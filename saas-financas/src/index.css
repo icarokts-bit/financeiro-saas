@@ -1,23 +1,13 @@
 :root {
+  /* Altera a fonte padrão do sistema para 'Inter' */
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --heading: 'Inter', system-ui, -apple-system, sans-serif;
+  
   --text: #6b6375;
   --text-h: #08060d;
   --bg: #ffffff;
   --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  /* Cor accent ajustada para o Verde Esmeralda do FinZap */
   --accent: #10b981;
-  --accent-bg: rgba(16, 185, 129, 0.1);
-  --accent-border: rgba(16, 185, 129, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow: rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
-
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
-
-  color-scheme: light dark;
-  color: var(--text);
-  background-color: var(--bg);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -26,13 +16,7 @@
     --text-h: #f3f4f6;
     --bg: #090d16;
     --border: #1e293b;
-    --code-bg: #1f2028;
-    /* Esmeralda vibrante para o tema escuro */
     --accent: #34d399;
-    --accent-bg: rgba(52, 211, 153, 0.15);
-    --accent-border: rgba(52, 211, 153, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow: rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
   }
 }
 
@@ -41,18 +25,4 @@ body {
   font-family: var(--sans);
   background-color: var(--bg);
   color: var(--text);
-}
-
-h1, h2, h3, h4 {
-  font-family: var(--heading);
-  color: var(--text-h);
-}
-
-code {
-  font-family: var(--mono);
-  background: var(--code-bg);
-  color: var(--text-h);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 14px;
 }
