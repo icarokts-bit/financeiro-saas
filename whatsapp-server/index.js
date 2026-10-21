@@ -113,7 +113,114 @@ async function startWhatsAppForUser(userId) {
 // ============================================================================
 // MOTOR INTELIGENTE DE INTERPRETAÇÃO DE MENSAGENS NO WHATSAPP
 // ============================================================================
-async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
+async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
+  try {
+    const userDoc = await db.collection('users').doc(userId).get();
+    const userData = userDoc.data() || {};
+    const cartoes = userData.cartoes || [{ nome: 'VISA', limite: 5000 }, { nome: 'NUBANK', limite: 3500 }, { nome: 'C6', limite: 4000 }];
+    const categorias = userData.categorias || ['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros'];
+    const orcamentos = userData.orcamentos || {};
+
+    const txtLower = textoUsuario.toLowerCase();
+    const hoje = new Date();
+    const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
+
+    // 1. Consultas Rápidas
+    const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite/i.test(txtLower) && !/gastei|comprei|paguei|recebi/i.test(txtLower);
+    if (isPergunta) {
+      const snap = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
+      const transMes = snap.docs.map(d => d.data());
+      const rec = transMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
+      const desp = transMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
+
+      await sock.sendMessage(remoteJid, {
+        text: `📊 *Resumo FinZap (${anoMesAtual})*\n\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Saldo Atual: R$ ${(rec - desp).toFixed(2)}*`
+      });
+      return;
+    }
+
+    // 2. Separação Inteligente por Fragmentos (Vírgulas ou " e ")
+    const partes = textoUsuario.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
+    let respostas = [];
+
+    for (const parte of partes) {
+      const pLow = parte.toLowerCase();
+      const matchValor = parte.match(/(\d+[.,]\d{2}|\d+)/);
+      if (!matchValor) continue;
+
+      const valor = parseFloat(matchValor[0].replace(',', '.'));
+      const isReceita = /recebi|ganhei|salário|salario|venda/i.test(pLow);
+      const tipo = isReceita ? 'RECEITA' : 'DESPESA';
+
+      // Método de pagamento individual do item
+      let metodo = 'PIX/DINHEIRO';
+      let cartaoNome = null;
+      if (/crédito|credito|cartão|cartao/i.test(pLow)) {
+        metodo = 'CREDITO';
+        for (const c of cartoes) {
+          if (pLow.includes(c.nome.toLowerCase())) {
+            cartaoNome = c.nome;
+            break;
+          }
+        }
+        if (!cartaoNome && cartoes.length > 0) cartaoNome = cartoes[0].nome;
+      } else if (/débito|debito/i.test(pLow)) {
+        metodo = 'DEBITO';
+      } else if (/pix/i.test(pLow)) {
+        metodo = 'PIX';
+      }
+
+      // Categoria
+      let categoria = isReceita ? 'Receita' : 'Outros';
+      if (/mercado|supermercado|compras|cebola/i.test(pLow)) categoria = 'Mercado';
+      else if (/lanche|restaurante|ifood|padaria|almoço|jantar|burger|pizza/i.test(pLow)) categoria = 'Alimentação';
+      else if (/uber|gasolina|combustível|posto|estacionamento|pedágio/i.test(pLow)) categoria = 'Transporte';
+      else if (/cinema|passeio|bar|viagem|lazer|shopping/i.test(pLow)) categoria = 'Lazer';
+      else if (/luz|água|internet|energia|boleto|aluguel/i.test(pLow)) categoria = 'Contas';
+
+      for (const cat of categorias) {
+        if (pLow.includes(cat.toLowerCase())) {
+          categoria = cat;
+          break;
+        }
+      }
+
+      // Limpeza da descrição
+      let descricao = parte
+        .replace(/no pix|no credito|no débito|credito|debito|pix|reais|r\$/gi, '')
+        .replace(matchValor[0], '')
+        .replace(cartaoNome ? new RegExp(cartaoNome, 'gi') : '', '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (!descricao || descricao.length < 2) descricao = categoria;
+      descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
+
+      await db.collection('users').doc(userId).collection('transacoes').add({
+        descricao,
+        valor,
+        tipo,
+        metodo,
+        cartao_nome: cartaoNome,
+        categoria,
+        anoMes: anoMesAtual,
+        origem: 'WHATSAPP_IA',
+        criadoEm: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      respostas.push(`✅ *${descricao}* [${categoria}]\n💰 R$ ${valor.toFixed(2)} • ${cartaoNome || metodo}`);
+    }
+
+    if (respostas.length > 0) {
+      await sock.sendMessage(remoteJid, { text: respostas.join('\n\n') });
+    } else {
+      await sock.sendMessage(remoteJid, { text: '🤔 Não consegui processar os valores. Tente enviar os lançamentos separados.' });
+    }
+
+  } catch (e) {
+    console.error('Erro:', e);
+  }
+}
   try {
     const userDoc = await db.collection('users').doc(userId).get();
     const userData = userDoc.data() || {};
