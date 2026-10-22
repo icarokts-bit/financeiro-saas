@@ -24,6 +24,8 @@ app.use(express.json());
 
 const sessions = new Map();
 const userJids = new Map();
+// Cache de mensagens enviadas para evitar o erro "Aguardando mensagem" no WhatsApp
+const sentMessagesCache = new Map();
 
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
 
@@ -33,7 +35,20 @@ const formatarDataBR = (isoDate) => {
   return `${d}/${m}/${a}`;
 };
 
-// Rota principal super leve para o cron-job.org nunca dar "output too large"
+// Função segura de envio que guarda a mensagem no cache de retry do protocolo Signal
+async function enviarMensagemSegura(sock, remoteJid, conteudo) {
+  const msgEnviada = await sock.sendMessage(remoteJid, conteudo);
+  if (msgEnviada?.key?.id && msgEnviada?.message) {
+    sentMessagesCache.set(msgEnviada.key.id, msgEnviada.message);
+    if (sentMessagesCache.size > 500) {
+      const firstKey = sentMessagesCache.keys().next().value;
+      sentMessagesCache.delete(firstKey);
+    }
+  }
+  return msgEnviada;
+}
+
+// Rota principal super leve para o cron-job.org
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
   res.status(200).send('OK');
@@ -98,36 +113,60 @@ app.post('/desconectar', async (req, res) => {
 });
 
 // ============================================================================
-// 2. ADAPTADOR DE AUTENTICAÇÃO DO BAILEYS NO FIREBASE FIRESTORE
+// 2. ADAPTADOR DE AUTENTICAÇÃO COM CACHE EM MEMÓRIA (EVITA ERRO DE CRIPTOGRAFIA)
 // ============================================================================
 async function useFirestoreAuthState(userId) {
   const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
   const fixId = (id) => id.replace(/\//g, '__').replace(/\./g, '_');
+  const localCache = new Map();
+
+  // Pré-carrega todas as chaves existentes na memória para leitura instantânea pelo Signal
+  try {
+    const allDocs = await sessionRef.get();
+    allDocs.forEach(doc => {
+      const payload = doc.data()?.payload;
+      if (payload) {
+        try {
+          localCache.set(doc.id, JSON.parse(payload, BufferJSON.reviver));
+        } catch (e) {}
+      }
+    });
+  } catch (err) {
+    console.error('Erro ao pré-carregar sessão do Firestore:', err);
+  }
 
   const writeData = async (data, id) => {
+    const fixed = fixId(id);
+    localCache.set(fixed, data);
     try {
       const jsonString = JSON.stringify(data, BufferJSON.replacer);
-      await sessionRef.doc(fixId(id)).set({ payload: jsonString });
+      await sessionRef.doc(fixed).set({ payload: jsonString });
     } catch (err) {
       console.error('Erro ao salvar chave no Firestore:', err);
     }
   };
 
   const readData = async (id) => {
+    const fixed = fixId(id);
+    if (localCache.has(fixed)) return localCache.get(fixed);
     try {
-      const docSnap = await sessionRef.doc(fixId(id)).get();
+      const docSnap = await sessionRef.doc(fixed).get();
       if (!docSnap.exists) return null;
       const { payload } = docSnap.data();
       if (!payload) return null;
-      return JSON.parse(payload, BufferJSON.reviver);
+      const parsed = JSON.parse(payload, BufferJSON.reviver);
+      localCache.set(fixed, parsed);
+      return parsed;
     } catch (error) {
       return null;
     }
   };
 
   const removeData = async (id) => {
+    const fixed = fixId(id);
+    localCache.delete(fixed);
     try {
-      await sessionRef.doc(fixId(id)).delete();
+      await sessionRef.doc(fixed).delete();
     } catch (error) {}
   };
 
@@ -165,7 +204,7 @@ async function useFirestoreAuthState(userId) {
 }
 
 // ============================================================================
-// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM BLOQUEIO DE CONVERSAS DE TERCEIROS)
+// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM GETMESSAGE ANTI-FALHA DE CIFRA)
 // ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
@@ -179,7 +218,16 @@ async function startWhatsAppForUser(userId) {
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
       browser: ['FinZap SaaS', 'Chrome', '1.0.0'],
-      keepAliveIntervalMs: 25000
+      keepAliveIntervalMs: 25000,
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
+      // Essencial para o WhatsApp re-encriptar a mensagem caso apareça "Aguardando mensagem"
+      getMessage: async (key) => {
+        if (sentMessagesCache.has(key.id)) {
+          return sentMessagesCache.get(key.id);
+        }
+        return { conversation: 'FinZap SaaS' };
+      }
     });
 
     sessions.set(userId, sock);
@@ -230,15 +278,13 @@ async function startWhatsAppForUser(userId) {
 
       const remoteJid = msg.key.remoteJid || '';
 
-      // 🛑 MELHORIA 7: BLOQUEIO ESTRITO PARA NÃO RESPONDER CONVERSAS COM OUTRAS PESSOAS
-      // Ignora grupos, listas de transmissão e canais
+      // Bloqueia grupos, canais e conversas com outras pessoas
       if (remoteJid.endsWith('@g.us') || remoteJid.includes('broadcast') || remoteJid.includes('newsletter')) return;
 
       const meuNumero = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : '';
       const meuLid = sock.user?.lid ? sock.user.lid.split(':')[0].split('@')[0] : '';
       const destinoNumero = remoteJid.split(':')[0].split('@')[0];
 
-      // Só aceita se o chat de destino for o próprio número do dono ou seu próprio LID ("Mensagem para você mesmo")
       const isChatProprio = (meuNumero && destinoNumero === meuNumero) || (meuLid && destinoNumero === meuLid);
       if (!isChatProprio) return;
 
@@ -342,14 +388,14 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
       }
 
       if (avisos.length > 0) {
-        await sock.sendMessage(remoteJid, {
+        await enviarMensagemSegura(sock, remoteJid, {
           text: `🔔 *Alerta de Vencimento Hoje (${formatarDataBR(dataHojeStr)})*\n\n` +
                 `Você possui os seguintes compromissos vencendo hoje:\n` +
                 `${avisos.join('\n')}\n\n` +
                 `💡 _Você pode dar baixa enviando "paguei [nome da conta] no pix" aqui no WhatsApp!_`
         });
       } else if (forcarDisparoManual) {
-        await sock.sendMessage(remoteJid, {
+        await enviarMensagemSegura(sock, remoteJid, {
           text: `🔔 *Teste de Alerta FinZap (${formatarDataBR(dataHojeStr)})*\n\n✅ Nenhuma conta ou fatura em aberto vence no dia de hoje (Dia ${diaHoje}).`
         });
       }
@@ -364,7 +410,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 setInterval(() => verificarAlertasVencimento(false), 30 * 60 * 1000);
 
 // ============================================================================
-// 5. EXTRAÇÃO INTELIGENTE DE DATA E DE CATEGORIA + SUBCATEGORIA (MELHORIA 9)
+// 5. EXTRAÇÃO INTELIGENTE DE DATA E DE CATEGORIA + SUBCATEGORIA
 // ============================================================================
 function extrairDataVencimento(texto) {
   const hoje = new Date();
@@ -416,7 +462,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
   }
 
-  // 3. Transporte (Combustível, Apps, Estacionamento, Manutenção)
+  // 3. Transporte
   if (/uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio/i.test(pLimpo)) {
     return { categoria: 'Transporte', subcategoria: 'Apps / Pedágio', reconhecida: true };
   }
@@ -427,7 +473,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Transporte', subcategoria: 'Manutenção / Veículo', reconhecida: true };
   }
 
-  // 4. Lazer (Passeios, Cinema, Assinaturas, Viagens)
+  // 4. Lazer
   if (/cinema|passeio|parque|show|ingresso|viagem|hotel|pousada|shopping|jogo|game|brinquedo/i.test(pLimpo)) {
     return { categoria: 'Lazer', subcategoria: 'Passeios', reconhecida: true };
   }
@@ -435,7 +481,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Lazer', subcategoria: 'Streaming', reconhecida: true };
   }
 
-  // 5. Contas (Casa, Utilidades, Educação, Saúde)
+  // 5. Contas
   if (/luz|energia|agua|sabesp|gas|internet|wifi|telefone|celular|vivo|claro|tim|aluguel|condominio|iptu|boleto|imposto|mei|das|contador|escola|faculdade|curso|farmacia|remedio|medico|consulta|exame|dentista/i.test(pLimpo)) {
     if (/luz|energia|agua|gas|internet|telefone|celular|aluguel|condominio|iptu/i.test(pLimpo)) {
       return { categoria: 'Contas', subcategoria: 'Casa / Fixas', reconhecida: true };
@@ -446,7 +492,6 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Contas', subcategoria: 'Boletos / Serviços', reconhecida: true };
   }
 
-  // 6. Verifica se o usuário escreveu explicitamente o nome de uma subcategoria ou categoria cadastrada
   for (const cat of categorias) {
     const subs = subcategoriasMap[cat] || [];
     for (const sub of subs) {
@@ -463,19 +508,20 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
 }
 
 // ============================================================================
-// 6. GRAVAÇÃO NO FIRESTORE + ALERTAS DE CARTÃO E CHEQUE ESPECIAL (MELHORIA 3)
+// 6. GRAVAÇÃO NO FIRESTORE + CÁLCULO PRECISO DE LIMITE E CHEQUE ESPECIAL
 // ============================================================================
 async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
   const hoje = new Date();
   const hojeStr = hoje.toISOString().split('T')[0];
   let respostas = [];
 
+  // Lê todas as transações ANTES de inserir as novas para não haver duplicidade nem atraso de indexação
   const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
   const todasTransacoes = snapAll.docs.map(d => d.data());
 
   for (const item of itens) {
     const parcelasTotal = item.parcelasTotal || 1;
-    const valorParcela = item.valorParcela;
+    const valorParcela = Number(item.valorParcela);
     const isAgendado = item.pago === false;
     const catFinal = item.categoria || 'Outros';
     const subFinal = item.subcategoria || 'Geral';
@@ -513,6 +559,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       };
 
       await db.collection('users').doc(userId).collection('transacoes').add(novoDoc);
+      // Empurra na lista em memória imediatamente para o cálculo do limite ser 100% exato!
       todasTransacoes.push(novoDoc);
     }
 
@@ -542,7 +589,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       }
     }
 
-    // 2. Alerta de Limite do Cartão de Crédito
+    // 2. Alerta de Limite do Cartão de Crédito (100% preciso somando a lista atualizada)
     if (item.metodo === 'CREDITO' && item.cartao_nome) {
       const objCartao = cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome));
       if (objCartao && Number(objCartao.limite) > 0) {
@@ -564,7 +611,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       }
     }
 
-    // 3. MELHORIA 3: Alerta de Uso do Cheque Especial (Saldo Negativo na Conta Bancária)
+    // 3. Alerta de Uso do Cheque Especial (Saldo Negativo na Conta Bancária)
     if (item.metodo !== 'CREDITO' && item.banco_nome) {
       const idxBanco = bancos.findIndex(b => semAcento(b.nome) === semAcento(item.banco_nome));
       if (idxBanco !== -1) {
@@ -601,7 +648,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 }
 
 // ============================================================================
-// 7. FUNÇÃO AUXILIAR PARA VERIFICAR SE FALTA FORMA DE PAGAMENTO, BANCO OU CATEGORIA
+// 7. FILA DE PENDÊNCIAS: PERGUNTA FORMA DE PAGAMENTO -> QUAL BANCO -> CATEGORIA
 // ============================================================================
 async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
   const userRef = db.collection('users').doc(userId);
@@ -634,25 +681,20 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
     let textoPergunta = '';
 
     const resumoPendentes = pendentes
-      .map(i => `• *${i.descricao}* — R$ ${i.valorTotal.toFixed(2)}`)
+      .map(i => `• *${i.descricao}* [${i.categoria || '?'} > ${i.subcategoria || '?'}] — R$ ${i.valorTotal.toFixed(2)}`)
       .join('\n');
 
     if (!primeiro.metodo && primeiro.pago !== false) {
       etapa = 'METODO';
       const opcoesCartoes = cartoes.map(c => c.nome).join(', ');
-      const opcoesBancos = bancos.map(b => b.nome).join(', ');
       textoPergunta =
         `❓ *Qual foi a forma de pagamento?*\n${resumoPendentes}\n\n` +
-        `Responda com:\n` +
-        `• *Pix* ou *Débito* (ex: _"Pix ${bancos[0]?.nome || 'Itaú'}"_)\n` +
-        `• *Cartão de Crédito* (*${opcoesCartoes}*)\n` +
-        `• *Dinheiro*\n` +
-        `_(Contas cadastradas: ${opcoesBancos})_`;
+        `Responda com: *Pix*, *Débito*, *Dinheiro* ou o nome do cartão (*${opcoesCartoes}*).`;
     } else if ((primeiro.metodo === 'PIX' || primeiro.metodo === 'DEBITO') && !primeiro.banco_nome && primeiro.pago !== false) {
       etapa = 'BANCO';
       const opcoesBancos = bancos.map(b => b.nome).join(' ou ');
       textoPergunta =
-        `🏦 *De qual conta bancária vai sair esse ${primeiro.metodo}?*\n${resumoPendentes}\n\n` +
+        `🏦 *De qual conta bancária saiu esse ${primeiro.metodo}?*\n${resumoPendentes}\n\n` +
         `Responda com o nome do banco: *${opcoesBancos}*`;
     } else {
       etapa = 'CATEGORIA';
@@ -661,7 +703,7 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
         `Exemplos de resposta:\n` +
         `• *Mercado* (vai para Alimentação > Mercado)\n` +
         `• *Lazer* (vai para Alimentação > Lazer)\n` +
-        `• *Transporte*, *Contas* ou *Categoria > Subcategoria*`;
+        `• *Transporte* ou *Contas*`;
     }
 
     await userRef.set({
@@ -679,7 +721,7 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
   }
 
   if (msgs.length > 0) {
-    await sock.sendMessage(remoteJid, { text: msgs.join('\n\n') });
+    await enviarMensagemSegura(sock, remoteJid, { text: msgs.join('\n\n') });
   }
 }
 
@@ -718,30 +760,28 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const hojeStr = hoje.toISOString().split('T')[0];
 
     // ------------------------------------------------------------------------
-    // MELHORIA 6: COMANDO "TESTE" PARA VERIFICAR SE A CONEXÃO ESTÁ OK
+    // COMANDO "TESTE" PARA VERIFICAR SE A CONEXÃO ESTÁ OK
     // ------------------------------------------------------------------------
     if (/^(teste|testar|ping|status|conexao|ta funcionando|esta funcionando)$/i.test(txtLimpo)) {
-      await sock.sendMessage(remoteJid, {
+      await enviarMensagemSegura(sock, remoteJid, {
         text: `🟢 *Conexão FinZap 100% Online!*\n\n` +
               `• Status do Bot: *Conectado e Operacional*\n` +
-              `• Banco de Dados: *Sincronizado*\n` +
-              `• Competência Ativa: *${anoMesAtual}*\n` +
-              `• Proteção de Chat: *Ativa (responde apenas no seu número)*`
+              `• Criptografia Signal: *Sincronizada*\n` +
+              `• Competência Ativa: *${anoMesAtual}*`
       });
       return;
     }
 
     // ------------------------------------------------------------------------
-    // MODO -1: TRATAMENTO DE RESPOSTAS PENDENTES (PAGAMENTO, BANCO, CATEGORIA OU FATURA)
+    // MODO -1: TRATAMENTO DE RESPOSTAS PENDENTES (METODO -> BANCO -> CATEGORIA)
     // ------------------------------------------------------------------------
     if (pendente) {
       if (/^(cancelar|esquecer|nao|abortar)$/i.test(txtLimpo)) {
         await userRef.set({ pendente_pagamento: null }, { merge: true });
-        await sock.sendMessage(remoteJid, { text: '🗑️ Operação pendente cancelada.' });
+        await enviarMensagemSegura(sock, remoteJid, { text: '🗑️ Operação pendente cancelada.' });
         return;
       }
 
-      // Caso especial: Pendente de escolher qual banco vai pagar uma FATURA ou CONTA EM ABERTO
       if (pendente.etapa === 'BAIXA_CONTA_BANCO' || pendente.etapa === 'PAGAR_FATURA_BANCO') {
         const bancoEscolhido = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos[0];
         if (bancoEscolhido) {
@@ -777,7 +817,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             });
 
             await userRef.set({ pendente_pagamento: null }, { merge: true });
-            await sock.sendMessage(remoteJid, {
+            await enviarMensagemSegura(sock, remoteJid, {
               text: `✅ *Fatura do cartão ${cartaoNome} paga com sucesso!*\n` +
                     `💰 Valor: *R$ ${Number(valorFatura).toFixed(2)}*\n` +
                     `🏦 Debitado da conta: *${bancoEscolhido.nome}*\n` +
@@ -795,7 +835,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
               data_pagamento: hojeStr
             });
             await userRef.set({ pendente_pagamento: null }, { merge: true });
-            await sock.sendMessage(remoteJid, {
+            await enviarMensagemSegura(sock, remoteJid, {
               text: `✅ *Baixa de Conta Efetivada!*\n` +
                     `• Conta: *${descricao}*\n` +
                     `• Valor: *R$ ${Number(valor).toFixed(2)}*\n` +
@@ -806,7 +846,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         }
       }
 
-      // Fluxo de itens de gastos pendentes (METODO -> BANCO -> CATEGORIA)
       if (Array.isArray(pendente.itens) && pendente.itens.length > 0) {
         let itensAtualizados = [...pendente.itens];
 
@@ -859,7 +898,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
                 valorParcela: vParc,
                 metodo: metodoEscolhido,
                 cartao_nome: cartaoEscolhido,
-                banco_nome: metodoEscolhido === 'CREDITO' ? null : (bancoEscolhido || it.banco_nome),
+                // Se respondeu apenas "Pix" ou "Débito" sem citar o banco, deixa banco_nome null para ele perguntar de qual conta bancária vai sair!
+                banco_nome: metodoEscolhido === 'CREDITO' ? null : (bancoEscolhido || it.banco_nome || null),
                 pago: true
               };
             });
@@ -868,7 +908,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             return;
           }
         } else if (pendente.etapa === 'BANCO') {
-          const bancoObj = bancos.find(b => txtLimpo.includes(semAcento(b.nome)));
+          const bancoObj = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos.find(b => semAcento(b.nome).includes(txtLimpo));
           if (bancoObj) {
             itensAtualizados = itensAtualizados.map(it => ({
               ...it,
@@ -909,8 +949,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MELHORIA 1: TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS PELO WHATSAPP
-    // Ex: "transferir 200 do Itau para Nubank"
+    // TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS PELO WHATSAPP
     // ------------------------------------------------------------------------
     if (/transferir|transferencia|transferi|passei.*para/i.test(txtLimpo)) {
       const textoNormTransf = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
@@ -967,7 +1006,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             criadoEm: admin.firestore.FieldValue.serverTimestamp()
           });
 
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `🔄 *Transferência Realizada com Sucesso!*\n\n` +
                   `• Origem: *${bancoOrigem}* (- R$ ${valorTransf.toFixed(2)})\n` +
                   `• Destino: *${bancoDestino}* (+ R$ ${valorTransf.toFixed(2)})\n` +
@@ -979,8 +1018,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MELHORIA 2 & 10: DAR BAIXA EM CONTAS EM ABERTO OU PAGAR FATURA PELO WHATSAPP
-    // Ex: "dar baixa na agua", "paguei a luz no pix Itau", "paguei a fatura do VISA"
+    // DAR BAIXA EM CONTAS EM ABERTO OU PAGAR FATURA PELO WHATSAPP
     // ------------------------------------------------------------------------
     const isComandoBaixa = /^(paguei|dar baixa|baixa|quitei|pagar fatura)/i.test(txtLimpo) && !/\b\d+[,\.]\d{2}\b/.test(textoUsuario);
     if (isComandoBaixa) {
@@ -991,7 +1029,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
       const bancoInformado = bancos.find(b => txtLimpo.includes(semAcento(b.nome)));
 
-      // A) Verifica se é pagamento de FATURA de cartão
       if (/fatura/i.test(txtLimpo)) {
         const cartaoAlvo = cartoes.find(c => txtLimpo.includes(semAcento(c.nome))) || cartoes[0];
         if (cartaoAlvo) {
@@ -1001,7 +1038,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           const totalFatura = itensFatura.reduce((a, b) => a + Number(b.valor || 0), 0);
 
           if (totalFatura <= 0) {
-            await sock.sendMessage(remoteJid, { text: `✅ A fatura do cartão *${cartaoAlvo.nome}* em ${anoMesAtual} já consta como paga!` });
+            await enviarMensagemSegura(sock, remoteJid, { text: `✅ A fatura do cartão *${cartaoAlvo.nome}* em ${anoMesAtual} já consta como paga!` });
             return;
           }
 
@@ -1016,7 +1053,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
               }
             }, { merge: true });
 
-            await sock.sendMessage(remoteJid, {
+            await enviarMensagemSegura(sock, remoteJid, {
               text: `💳 *Pagamento da Fatura ${cartaoAlvo.nome} (R$ ${totalFatura.toFixed(2)})*\n\n` +
                     `🏦 *De qual conta bancária vai debitar o valor?*\nResponda com: *${listaBancos}*`
             });
@@ -1048,14 +1085,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             criadoEm: admin.firestore.FieldValue.serverTimestamp()
           });
 
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `✅ *Fatura ${cartaoAlvo.nome} paga com sucesso!*\n💰 Valor: R$ ${totalFatura.toFixed(2)} debitado de *${bancoInformado.nome}*.`
           });
           return;
         }
       }
 
-      // B) Verifica contas em aberto no mês para dar baixa pelo nome (ex: "paguei a agua")
       const contasAbertas = transMes.filter(t => t.pago === false);
       const contaEncontrada = contasAbertas.find(t => {
         const descLimpa = semAcento(t.descricao);
@@ -1077,7 +1113,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             }
           }, { merge: true });
 
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `🏦 *Dar baixa em: ${contaEncontrada.descricao} (R$ ${Number(contaEncontrada.valor).toFixed(2)})*\n\n` +
                   `De qual conta bancária saiu o pagamento?\nResponda com: *${listaBancos}*`
           });
@@ -1091,7 +1127,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           data_pagamento: hojeStr
         });
 
-        await sock.sendMessage(remoteJid, {
+        await enviarMensagemSegura(sock, remoteJid, {
           text: `✅ *Baixa realizada com sucesso!*\n• *${contaEncontrada.descricao}* — R$ ${Number(contaEncontrada.valor).toFixed(2)}\n• Debitado de: *${bancoInformado.nome}* (${metodoBaixa})`
         });
         return;
@@ -1110,7 +1146,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         .get();
 
       if (ultimoSnap.empty) {
-        await sock.sendMessage(remoteJid, { text: '⚠️ Nenhum lançamento encontrado para apagar.' });
+        await enviarMensagemSegura(sock, remoteJid, { text: '⚠️ Nenhum lançamento encontrado para apagar.' });
         return;
       }
 
@@ -1137,7 +1173,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           });
           await batch.commit();
 
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `🗑️ *Último envio desfeito!*\nForam removidos *${docsParaApagar.length} lançamentos* vinculados (Total: R$ ${totalRemovido.toFixed(2)}).`
           });
           return;
@@ -1145,7 +1181,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
 
       await docRecente.ref.delete();
-      await sock.sendMessage(remoteJid, {
+      await enviarMensagemSegura(sock, remoteJid, {
         text: `🗑️ *Lançamento removido com sucesso!*\n• ${dadosRecentes.descricao} [${dadosRecentes.categoria}] — R$ ${Number(dadosRecentes.valor || 0).toFixed(2)}`
       });
       return;
@@ -1172,7 +1208,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         }).sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
 
         if (listaProximas.length === 0) {
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `⏳ *Contas Próximas do Vencimento (Até 5 dias)*\n\n🎉 Você não tem nenhuma conta em aberto vencendo nos próximos 5 dias!`
           });
           return;
@@ -1186,7 +1222,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           return `• *${t.descricao}* [${t.categoria}]\n   💰 R$ ${Number(t.valor).toFixed(2)} — Vence: *${formatarDataBR(t.data_vencimento)}* (${tagDia})`;
         }).join('\n\n');
 
-        await sock.sendMessage(remoteJid, {
+        await enviarMensagemSegura(sock, remoteJid, {
           text: `⏳ *Contas Próximas do Vencimento (Até 5 dias)*\n\n${linhas}\n\n📌 *Total:* R$ ${totalProx.toFixed(2)}`
         });
         return;
@@ -1198,7 +1234,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           .sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
 
         if (abertasMes.length === 0) {
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `📅 *Contas a Vencer (${anoMesAtual})*\n\n✅ Você não tem nenhuma conta em aberto neste mês!`
           });
           return;
@@ -1212,7 +1248,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           return `${icone} *${t.descricao}* — R$ ${Number(t.valor).toFixed(2)}\n   📅 Vencimento: *${formatarDataBR(t.data_vencimento)}*`;
         }).join('\n\n');
 
-        await sock.sendMessage(remoteJid, {
+        await enviarMensagemSegura(sock, remoteJid, {
           text: `📅 *Contas em Aberto do Mês (${anoMesAtual})*\n\n${linhas}\n\n🔴 *Total a Pagar:* R$ ${totalPagar.toFixed(2)}\n🟢 *Total a Receber:* R$ ${totalReceber.toFixed(2)}`
         });
         return;
@@ -1220,7 +1256,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MODO 1: CONSULTOR FINANCEIRO (Categorias, Cartões, Saldos e Cheque Especial)
+    // MODO 1: CONSULTOR FINANCEIRO
     // ------------------------------------------------------------------------
     const isPergunta = /\?|quanto|qual|resumo|saldo|saldos|fatura|limite|disponivel|melhor dia|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLimpo);
     
@@ -1240,14 +1276,14 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         if (limiteCat > 0) {
           const disponivel = limiteCat - gastoCat;
           const pct = Math.round((gastoCat / limiteCat) * 100);
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `🎯 *Categoria: ${catPerguntada} (${anoMesAtual})*\n\n` +
                   `• Limite definido: *R$ ${limiteCat.toFixed(2)}*\n` +
                   `• Gasto até agora: *R$ ${gastoCat.toFixed(2)}* (${pct}%)\n` +
                   `• ${disponivel >= 0 ? `Disponível para gastar: *R$ ${disponivel.toFixed(2)}* 🟢` : `Limite excedido em: *R$ ${Math.abs(disponivel).toFixed(2)}* 🔴`}`
           });
         } else {
-          await sock.sendMessage(remoteJid, {
+          await enviarMensagemSegura(sock, remoteJid, {
             text: `📂 *Categoria: ${catPerguntada} (${anoMesAtual})*\n\n` +
                   `• Gasto acumulado: *R$ ${gastoCat.toFixed(2)}*\n` +
                   `• Limite mensal: *Sem limite definido no painel*`
@@ -1269,7 +1305,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         const limiteCartao = Number(cartaoPerguntado.limite || 0);
         const disponivelCartao = limiteCartao - comprometidoTotal;
 
-        await sock.sendMessage(remoteJid, {
+        await enviarMensagemSegura(sock, remoteJid, {
           text: `💳 *Cartão ${cartaoPerguntado.nome}*\n\n` +
                 `• Fatura deste mês (${anoMesAtual}): *R$ ${faturaMes.toFixed(2)}*\n` +
                 `• Total comprometido (com parcelas): *R$ ${comprometidoTotal.toFixed(2)}*\n` +
@@ -1292,7 +1328,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           const dispC = Number(c.limite || 0) - compC;
           msgCartoes += `🔹 *${c.nome}*\n   Fatura Mês: R$ ${faturaC.toFixed(2)} | Disponível: R$ ${dispC.toFixed(2)}\n   Melhor dia compra: Dia ${c.diaFechamento || 5} (Vence dia ${c.diaVencimento || 12})\n\n`;
         }
-        await sock.sendMessage(remoteJid, { text: msgCartoes.trim() });
+        await enviarMensagemSegura(sock, remoteJid, { text: msgCartoes.trim() });
         return;
       }
 
@@ -1313,7 +1349,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         linhasBancos += `• *${b.nome}:* R$ ${sldB.toFixed(2)} ${sldB < 0 ? '🚨 *(Cheque Especial)*' : ''}\n`;
       });
 
-      await sock.sendMessage(remoteJid, {
+      await enviarMensagemSegura(sock, remoteJid, {
         text: `📊 *Resumo FinZap (${anoMesAtual})*\n\n` +
               `🟢 Receitas do Mês: R$ ${rec.toFixed(2)}\n` +
               `🔴 Despesas do Mês: R$ ${desp.toFixed(2)}\n` +
@@ -1325,7 +1361,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MODO 2: LANÇAMENTOS (Com Subcategorias e Pergunta de Banco/Método/Categoria)
+    // MODO 2: LANÇAMENTOS (Com Regex Corrigida para não cortar palavras como "Supermercado")
     // ------------------------------------------------------------------------
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
@@ -1336,12 +1372,12 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       const pLimpo = semAcento(parte);
 
       const infoVencimento = extrairDataVencimento(parte);
-      const isAgendado = Boolean(infoVencimento) || /vence|vencimento|a pagar|a receber|boleto para/i.test(pLimpo);
+      const isAgendado = Boolean(infoVencimento) || /\b(vence|vencimento|a pagar|a receber|boleto para)\b/i.test(pLimpo);
 
       const parteSemData = infoVencimento ? parte.replace(infoVencimento.trechoRemovido, ' ') : parte;
       const pLimpoSemData = semAcento(parteSemData);
 
-      const matchParcelas = pLimpoSemData.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+      const matchParcelas = pLimpoSemData.match(/\b(\d+)\s*(?:x|vezes|parcelas)\b/i);
       const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
 
       const textoSemParcela = matchParcelas ? parteSemData.replace(new RegExp(matchParcelas[0], 'i'), '') : parteSemData;
@@ -1352,7 +1388,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       if (isNaN(valorTotal) || valorTotal <= 0) continue;
 
       const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
-      const isReceita = /recebi|ganhei|salario|venda|a receber|receber/i.test(pLimpo);
+      const isReceita = /\b(recebi|ganhei|salario|venda|a receber|receber)\b/i.test(pLimpo);
       const tipo = isReceita ? 'RECEITA' : 'DESPESA';
 
       let metodo = null;
@@ -1371,21 +1407,21 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         if (pLimpo.includes(semAcento(b.nome))) {
           bancoNome = b.nome;
           if (!metodo) {
-            metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX';
+            metodo = /\bdebito\b/i.test(pLimpo) ? 'DEBITO' : 'PIX';
           }
           break;
         }
       }
 
       if (!metodo) {
-        if (/credito|cartao/i.test(pLimpo) || parcelasTotal > 1) {
+        if (/\b(credito|cartao)\b/i.test(pLimpo) || parcelasTotal > 1) {
           metodo = 'CREDITO';
           cartaoNome = cartoes[0]?.nome || 'CREDITO';
-        } else if (/debito/i.test(pLimpo)) {
+        } else if (/\bdebito\b/i.test(pLimpo)) {
           metodo = 'DEBITO';
-        } else if (/pix/i.test(pLimpo)) {
+        } else if (/\bpix\b/i.test(pLimpo)) {
           metodo = 'PIX';
-        } else if (/dinheiro|especie/i.test(pLimpo)) {
+        } else if (/\b(dinheiro|especie)\b/i.test(pLimpo)) {
           metodo = 'DINHEIRO';
         } else if (isAgendado) {
           metodo = 'BOLETO / AGENDADO';
@@ -1394,14 +1430,15 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         }
       }
 
-      // MELHORIA 9: Reconhecimento automático de Categoria e Subcategoria
       const classif = classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategorias);
 
+      // Limpeza de palavras com limites de palavra (\b) para NUNCA cortar o final de "Supermercado" ou "Cartão"
       let descricao = textoSemParcela
-        .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|a pagar|a receber|dia|no cartao de credito|no cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |do |da |no |na |em /gi, ' ')
+        .replace(/\b(fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|a pagar|a receber|dia|no cartao de credito|cartao de credito|no cartao|cartão|cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|um|uma|uns|umas|de|do|da|no|na|em)\b/gi, ' ')
+        .replace(/r\$/gi, ' ')
         .replace(matchValor[0], '')
-        .replace(cartaoNome ? new RegExp(cartaoNome, 'gi') : '', '')
-        .replace(bancoNome ? new RegExp(bancoNome, 'gi') : '', '')
+        .replace(cartaoNome ? new RegExp(`\\b${cartaoNome}\\b`, 'gi') : '', '')
+        .replace(bancoNome ? new RegExp(`\\b${bancoNome}\\b`, 'gi') : '', '')
         .replace(/\s+/g, ' ')
         .trim();
 
