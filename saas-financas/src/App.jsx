@@ -3,8 +3,8 @@ import {
   Wallet, TrendingUp, TrendingDown, CreditCard, MessageSquare, 
   Plus, Trash2, QrCode, Send, LogOut, BarChart2, Calendar, 
   FolderPlus, Target, AlertTriangle, Sparkles, CheckCircle2, 
-  Clock, Zap, BrainCircuit, Receipt, RefreshCw, Landmark, 
-  Edit3, Check, X, ShieldAlert, BellRing
+  Clock, Zap, BrainCircuit, RefreshCw, Landmark, 
+  Edit3, X, ShieldAlert, Search, ArrowUpDown, FileText
 } from 'lucide-react';
 import { db, auth } from './firebaseConfig';
 import { 
@@ -24,6 +24,12 @@ import {
 
 const RENDER_API_URL = 'https://finzap-whatsapp-api.onrender.com';
 
+const formatarDataBR = (isoDate) => {
+  if (!isoDate || !isoDate.includes('-')) return isoDate || '-';
+  const [a, m, d] = isoDate.split('-');
+  return `${d}/${m}/${a}`;
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [carregandoAuth, setCarregandoAuth] = useState(true);
@@ -36,42 +42,60 @@ export default function App() {
   const [abaAtiva, setAbaAtiva] = useState('dashboard');
   const [transacoes, setTransacoes] = useState([]);
 
-  // Cartões com limite, dia de fechamento e dia de vencimento
+  // Cartões de Crédito
   const [cartoes, setCartoes] = useState([
     { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12, banco: 'Itaú' },
     { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17, banco: 'Nubank' }
   ]);
 
-  // Bancos e Contas de Débito/Pix
+  // Bancos e Contas (Saldos)
   const [bancos, setBancos] = useState([
-    { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 0 },
-    { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 0 }
+    { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 1500 },
+    { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
   ]);
   
   const [categorias, setCategorias] = useState(['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
   const [orcamentos, setOrcamentos] = useState({});
-  const [contasFixas, setContasFixas] = useState([
-    { id: 'f1', nome: 'Energia Elétrica', valorPadrao: 180, diaVencimento: 15, categoria: 'Contas' },
-    { id: 'f2', nome: 'Internet Fibra', valorPadrao: 120, diaVencimento: 10, categoria: 'Contas' }
-  ]);
 
   const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
   const [whatsappQrCode, setWhatsappQrCode] = useState(null);
   const [carregandoQr, setCarregandoQr] = useState(false);
 
-  // Estados de Formulários - Categorias & Contas Fixas
+  const dataAtualObj = new Date();
+  const diaHoje = dataAtualObj.getDate();
+  const hojeIso = dataAtualObj.toISOString().split('T')[0];
+  const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
+  const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
+
+  // Estados de Formulários - Categorias
   const [novaCatNome, setNovaCatNome] = useState('');
   const [orcamentoCat, setOrcamentoCat] = useState('');
   const [orcamentoValor, setOrcamentoValor] = useState('');
-  const [fixaNome, setFixaNome] = useState('');
-  const [fixaValor, setFixaValor] = useState('');
-  const [fixaDia, setFixaDia] = useState('');
 
   // Estados de Formulários - Cadastro e Edição de Cartões e Bancos
   const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
 
-  // Estados da Aba Cartão de Crédito (Fatura Detalhada, Lançamento Parcelado e Edição de Compra)
+  // Estados da Aba "Contas a Vencer & Receber"
+  const [formAgendamento, setFormAgendamento] = useState({
+    descricao: '',
+    valor: '',
+    data_vencimento: hojeIso,
+    tipo: 'DESPESA',
+    categoria: 'Contas',
+    banco_nome: 'Itaú',
+    pago: false
+  });
+  const [filtroVencNome, setFiltroVencNome] = useState('');
+  const [filtroVencCat, setFiltroVencCat] = useState('TODAS');
+  const [filtroVencStatus, setFiltroVencStatus] = useState('ABERTO'); // TODOS, ABERTO, PAGO
+  const [filtroVencData, setFiltroVencData] = useState('TODOS'); // TODOS, PROXIMOS_5_DIAS, VENCIDOS
+
+  // Estados da Aba "Movimentação (Extrato)"
+  const [pesquisaExtrato, setPesquisaExtrato] = useState('');
+  const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS'); // TODOS, RECEITA, DESPESA, CREDITO, FATURA
+
+  // Estados da Aba Cartão de Crédito & Modal de Pagamento Total/Parcial
   const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
   const [novaCompraCartao, setNovaCompraCartao] = useState({
     descricao: '',
@@ -80,20 +104,16 @@ export default function App() {
     cartaoNome: 'VISA',
     categoria: 'Alimentação'
   });
+  const [modalPagarFatura, setModalPagarFatura] = useState(null); // { cartaoNome, valorFatura, tipoPagamento: 'TOTAL' | 'PARCIAL', valorPago: '', bancoSaida: '' }
   const [transacaoEditando, setTransacaoEditando] = useState(null);
 
-  const dataAtualObj = new Date();
-  const diaHoje = dataAtualObj.getDate();
-  const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
-  const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
-
-  // Estados do Simulador de WhatsApp (com suporte a pergunta de forma de pagamento pendente)
+  // Estados do Simulador de WhatsApp
   const [msgWhats, setMsgWhats] = useState('');
   const [pendenteSimulador, setPendenteSimulador] = useState(null);
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades:\n1️⃣ Se você esquecer a forma de pagamento (ex: "Gastei 50 na padaria"), eu pergunto qual foi!\n2️⃣ Alertas de limite de cartão (80% e 100%).\n3️⃣ Comandos: "Qual meu saldo?", "Fatura do VISA" ou "desfazer".' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovos comandos disponíveis:\n1️⃣ Agendar conta: "Água vence 25/10 valor 85,00"\n2️⃣ Consultar: "contas a vencer" ou "contas proximas do vencimento"\n3️⃣ Esquecer método: "Gastei 50 na padaria" (eu pergunto qual foi!)' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -113,7 +133,6 @@ export default function App() {
           if (dados.orcamentos) setOrcamentos(dados.orcamentos);
           if (dados.cartoes) setCartoes(dados.cartoes);
           if (dados.bancos) setBancos(dados.bancos);
-          if (dados.contasFixas) setContasFixas(dados.contasFixas);
           if (dados.whatsapp_status) setWhatsappStatus(dados.whatsapp_status);
           if (dados.whatsapp_qrcode) setWhatsappQrCode(dados.whatsapp_qrcode);
         } else {
@@ -122,7 +141,6 @@ export default function App() {
             orcamentos: {}, 
             cartoes, 
             bancos,
-            contasFixas, 
             whatsapp_status: 'DISCONNECTED' 
           }, { merge: true });
         }
@@ -159,13 +177,17 @@ export default function App() {
       const lista = snapshot.docs.map(docSnap => {
         const dataDoc = docSnap.data();
         let anoMes = dataDoc.anoMes;
+        let dataIso = dataDoc.data_vencimento;
         if (!anoMes && dataDoc.criadoEm) {
           const d = dataDoc.criadoEm.toDate ? dataDoc.criadoEm.toDate() : new Date();
           anoMes = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+          if (!dataIso) dataIso = d.toISOString().split('T')[0];
         }
         return {
           id: docSnap.id,
           ...dataDoc,
+          pago: dataDoc.pago !== undefined ? dataDoc.pago : true,
+          data_vencimento: dataIso || `${anoMes || mesAtualStr}-10`,
           anoMes: anoMes || mesAtualStr
         };
       });
@@ -225,15 +247,6 @@ export default function App() {
       setWhatsappQrCode(null);
     } catch (e) {
       alert('Erro ao desconectar aparelho.');
-    }
-  };
-
-  const dispararTesteAlertaWhatsApp = async () => {
-    try {
-      await fetch(`${RENDER_API_URL}/verificar-alertas`);
-      alert('Verificação de alertas de vencimento enviada para o servidor do WhatsApp!');
-    } catch (e) {
-      alert('Erro ao acionar verificação no servidor.');
     }
   };
 
@@ -315,7 +328,44 @@ export default function App() {
   };
 
   // ==========================================================================
-  // FUNÇÕES DA ABA CARTÃO DE CRÉDITO (LANÇAR PARCELADO, PAGAR FATURA, EDITAR)
+  // GESTÃO DE CONTAS A VENCER & A RECEBER
+  // ==========================================================================
+  const lancarContaAgendada = async (e) => {
+    e.preventDefault();
+    if (!formAgendamento.descricao || !formAgendamento.valor || !user) return;
+
+    const anoMesVenc = formAgendamento.data_vencimento ? formAgendamento.data_vencimento.slice(0, 7) : filtroMesAno;
+
+    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+      descricao: formAgendamento.descricao,
+      valor: Number(formAgendamento.valor),
+      tipo: formAgendamento.tipo,
+      metodo: formAgendamento.pago ? 'PIX/BOLETO' : 'BOLETO / AGENDADO',
+      cartao_nome: null,
+      banco_nome: formAgendamento.banco_nome || bancos[0]?.nome || null,
+      categoria: formAgendamento.categoria,
+      pago: Boolean(formAgendamento.pago),
+      data_vencimento: formAgendamento.data_vencimento || hojeIso,
+      anoMes: anoMesVenc,
+      mensagem_original: `Agendamento manual: ${formAgendamento.descricao}`,
+      criadoEm: serverTimestamp()
+    });
+
+    setFormAgendamento({ ...formAgendamento, descricao: '', valor: '', pago: false });
+  };
+
+  const alternarStatusPago = async (transacao) => {
+    if (!user) return;
+    const novoStatus = !transacao.pago;
+    await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacao.id), {
+      pago: novoStatus,
+      metodo: novoStatus && transacao.metodo === 'BOLETO / AGENDADO' ? 'PIX/BOLETO' : transacao.metodo,
+      banco_nome: transacao.banco_nome || bancos[0]?.nome || null
+    });
+  };
+
+  // ==========================================================================
+  // FUNÇÕES DA ABA CARTÃO DE CRÉDITO (PARCELADO E PAGAMENTO TOTAL / PARCIAL)
   // ==========================================================================
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
@@ -341,6 +391,8 @@ export default function App() {
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
         fatura_paga: false,
+        pago: true,
+        data_vencimento: `${anoM}-${mesM}-15`,
         anoMes: `${anoM}-${mesM}`,
         mensagem_original: `Lançamento manual no cartão ${novaCompraCartao.cartaoNome}`,
         criadoEm: serverTimestamp()
@@ -350,22 +402,83 @@ export default function App() {
     setNovaCompraCartao({ ...novaCompraCartao, descricao: '', valorTotal: '', parcelas: '1' });
   };
 
-  const pagarFaturaCartao = async (nomeCartao) => {
-    if (!user) return;
-    const comprasDaFatura = transacoes.filter(
-      t => t.anoMes === filtroMesAno && t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === nomeCartao.toLowerCase() && !t.fatura_paga
-    );
-
-    if (comprasDaFatura.length === 0) {
-      return alert(`A fatura do cartão ${nomeCartao} em ${filtroMesAno} já está paga ou sem lançamentos!`);
+  const abrirModalPagamentoFatura = (cartaoObj) => {
+    if (cartaoObj.faturaMes <= 0) {
+      return alert(`A fatura do cartão ${cartaoObj.nome} em ${filtroMesAno} já está zerada ou paga!`);
     }
+    setModalPagarFatura({
+      cartaoNome: cartaoObj.nome,
+      valorFatura: cartaoObj.faturaMes,
+      tipoPagamento: 'TOTAL',
+      valorPago: cartaoObj.faturaMes.toFixed(2),
+      bancoSaida: bancos[0]?.nome || 'Itaú'
+    });
+  };
 
-    for (const item of comprasDaFatura) {
-      await updateDoc(doc(db, 'users', user.uid, 'transacoes', item.id), {
-        fatura_paga: true
+  const confirmarPagamentoFatura = async (e) => {
+    e.preventDefault();
+    if (!modalPagarFatura || !user) return;
+
+    const valorPagarNum = parseFloat(modalPagarFatura.valorPago);
+    if (isNaN(valorPagarNum) || valorPagarNum <= 0) return alert('Informe um valor válido.');
+
+    const { cartaoNome, tipoPagamento, bancoSaida } = modalPagarFatura;
+
+    if (tipoPagamento === 'TOTAL' || valorPagarNum >= modalPagarFatura.valorFatura) {
+      const comprasDaFatura = transacoes.filter(
+        t => t.anoMes === filtroMesAno && t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cartaoNome.toLowerCase() && !t.fatura_paga
+      );
+      for (const item of comprasDaFatura) {
+        await updateDoc(doc(db, 'users', user.uid, 'transacoes', item.id), {
+          fatura_paga: true
+        });
+      }
+      // Registra a saída do dinheiro da conta bancária selecionada para abater no Saldo do Banco
+      await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+        descricao: `Pagamento Total Fatura ${cartaoNome}`,
+        valor: modalPagarFatura.valorFatura,
+        tipo: 'DESPESA',
+        metodo: 'PAGAMENTO_FATURA',
+        cartao_nome: null,
+        banco_nome: bancoSaida,
+        categoria: 'Contas',
+        pago: true,
+        data_vencimento: hojeIso,
+        anoMes: filtroMesAno,
+        criadoEm: serverTimestamp()
+      });
+    } else {
+      // Pagamento Parcial: gera um abatimento negativo na fatura do cartão (liberando limite parcial) e debita do banco
+      await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+        descricao: `Pagamento Parcial / Antecipação (${cartaoNome})`,
+        valor: -Math.abs(valorPagarNum),
+        tipo: 'DESPESA',
+        metodo: 'CREDITO',
+        cartao_nome: cartaoNome,
+        categoria: 'Contas',
+        fatura_paga: false,
+        pago: true,
+        data_vencimento: hojeIso,
+        anoMes: filtroMesAno,
+        criadoEm: serverTimestamp()
+      });
+
+      await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+        descricao: `Pagamento Parcial Fatura ${cartaoNome}`,
+        valor: valorPagarNum,
+        tipo: 'DESPESA',
+        metodo: 'PAGAMENTO_FATURA',
+        cartao_nome: null,
+        banco_nome: bancoSaida,
+        categoria: 'Contas',
+        pago: true,
+        data_vencimento: hojeIso,
+        anoMes: filtroMesAno,
+        criadoEm: serverTimestamp()
       });
     }
-    alert(`✅ Fatura de ${nomeCartao} (${filtroMesAno}) marcada como PAGA! O limite do cartão foi liberado.`);
+
+    setModalPagarFatura(null);
   };
 
   const salvarEdicaoTransacao = async (e) => {
@@ -377,13 +490,16 @@ export default function App() {
       valor: Number(transacaoEditando.valor),
       categoria: transacaoEditando.categoria,
       metodo: transacaoEditando.metodo,
+      data_vencimento: transacaoEditando.data_vencimento || hojeIso,
+      pago: Boolean(transacaoEditando.pago),
+      banco_nome: transacaoEditando.banco_nome || null,
       cartao_nome: transacaoEditando.metodo === 'CREDITO' ? transacaoEditando.cartao_nome : null
     });
     setTransacaoEditando(null);
   };
 
   // ==========================================================================
-  // CATEGORIAS E CONTAS FIXAS
+  // CATEGORIAS & ORÇAMENTOS
   // ==========================================================================
   const adicionarCategoria = async (e) => {
     e.preventDefault();
@@ -415,54 +531,39 @@ export default function App() {
     await setDoc(doc(db, 'users', user.uid), { categorias: novasCats, orcamentos: novosOrcamentos }, { merge: true });
   };
 
-  const adicionarContaFixa = async (e) => {
-    e.preventDefault();
-    if (!fixaNome || !fixaValor || !user) return;
-    const novas = [...contasFixas, {
-      id: Date.now().toString(),
-      nome: fixaNome,
-      valorPadrao: Number(fixaValor),
-      diaVencimento: Number(fixaDia) || 10,
-      categoria: 'Contas'
-    }];
-    setContasFixas(novas);
-    setFixaNome('');
-    setFixaValor('');
-    setFixaDia('');
-    await setDoc(doc(db, 'users', user.uid), { contasFixas: novas }, { merge: true });
-  };
-
-  const excluirContaFixa = async (id) => {
-    const novas = contasFixas.filter(c => c.id !== id);
-    setContasFixas(novas);
-    await setDoc(doc(db, 'users', user.uid), { contasFixas: novas }, { merge: true });
-  };
-
-  const pagarContaFixaRapido = async (conta) => {
-    if (!user) return;
-    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
-      descricao: conta.nome,
-      valor: Number(conta.valorPadrao),
-      tipo: 'DESPESA',
-      metodo: 'PIX/BOLETO',
-      cartao_nome: null,
-      categoria: conta.categoria || 'Contas',
-      anoMes: filtroMesAno,
-      conta_fixa_id: conta.id,
-      mensagem_original: `Baixa automática de conta fixa: ${conta.nome}`,
-      criadoEm: serverTimestamp()
-    });
-  };
-
   // ==========================================================================
-  // SIMULADOR INTELIGENTE NO PAINEL (COM PERGUNTA DE FORMA DE PAGAMENTO)
+  // SIMULADOR INTELIGENTE NO PAINEL (COM VENCIMENTOS FUTUROS E CONSULTAS)
   // ==========================================================================
+  const extrairDataTextoSimulador = (texto) => {
+    const anoAtual = dataAtualObj.getFullYear();
+    const mesAtual = dataAtualObj.getMonth() + 1;
+    const matchData = texto.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
+    if (matchData) {
+      const dia = String(matchData[1]).padStart(2, '0');
+      const mes = String(matchData[2]).padStart(2, '0');
+      let ano = matchData[3] ? String(matchData[3]) : String(anoAtual);
+      if (ano.length === 2) ano = `20${ano}`;
+      return { dataVencimento: `${ano}-${mes}-${dia}`, anoMes: `${ano}-${mes}`, trecho: matchData[0] };
+    }
+    const matchDia = texto.match(/(?:vence|vencimento|dia)\s+(\d{1,2})\b/i);
+    if (matchDia) {
+      const dia = String(matchDia[1]).padStart(2, '0');
+      const mes = String(mesAtual).padStart(2, '0');
+      return { dataVencimento: `${anoAtual}-${mes}-${dia}`, anoMes: `${anoAtual}-${mes}`, trecho: matchDia[0] };
+    }
+    return null;
+  };
+
   const interpretarItemUnico = (trecho) => {
     const txtLower = trecho.toLowerCase();
-    const matchParcelas = txtLower.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+    const infoVenc = extrairDataTextoSimulador(trecho);
+    const isAgendado = Boolean(infoVenc) || /vence|vencimento|a pagar|a receber/i.test(txtLower);
+
+    const trechoSemData = infoVenc ? trecho.replace(infoVenc.trecho, ' ') : trecho;
+    const matchParcelas = trechoSemData.toLowerCase().match(/(\d+)\s*(?:x|vezes|parcelas)/);
     const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
 
-    const textoSemParcela = matchParcelas ? trecho.replace(matchParcelas[0], '') : trecho;
+    const textoSemParcela = matchParcelas ? trechoSemData.replace(matchParcelas[0], '') : trechoSemData;
     const matchValor = textoSemParcela.match(/(\d+\.\d{2}|\d+)/);
     if (!matchValor) return null;
     
@@ -470,11 +571,12 @@ export default function App() {
     if (isNaN(valorTotal) || valorTotal <= 0) return null;
 
     const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
-    const isReceita = /recebi|ganhei|salário|salario|pix recebido|venda|cliente/i.test(txtLower);
+    const isReceita = /recebi|ganhei|salário|salario|pix recebido|venda|cliente|a receber/i.test(txtLower);
     const tipo = isReceita ? 'RECEITA' : 'DESPESA';
 
     let metodo = null;
     let cartaoIdentificado = null;
+    let bancoIdentificado = bancos[0]?.nome || null;
 
     for (const c of cartoes) {
       if (txtLower.includes(c.nome.toLowerCase())) {
@@ -494,6 +596,8 @@ export default function App() {
         metodo = 'PIX';
       } else if (/dinheiro|espécie|especie/i.test(txtLower)) {
         metodo = 'DINHEIRO';
+      } else if (isAgendado) {
+        metodo = 'BOLETO / AGENDADO';
       } else if (isReceita) {
         metodo = 'PIX';
       }
@@ -504,7 +608,7 @@ export default function App() {
     else if (/lanche|restaurante|ifood|padaria|almoço|jantar|burger|pizza|café/i.test(txtLower)) categoria = 'Alimentação';
     else if (/uber|gasolina|combustível|posto|99|estacionamento|pedágio/i.test(txtLower)) categoria = 'Transporte';
     else if (/cinema|passeio|bar|viagem|streaming|netflix|jogo|shopping/i.test(txtLower)) categoria = 'Lazer';
-    else if (/luz|água|internet|energia|boleto|aluguel|condomínio/i.test(txtLower)) categoria = 'Contas';
+    else if (/luz|água|agua|internet|energia|boleto|aluguel|condomínio|vence/i.test(txtLower)) categoria = 'Contas';
 
     for (const cat of categorias) {
       if (txtLower.includes(cat.toLowerCase())) {
@@ -514,13 +618,13 @@ export default function App() {
     }
 
     let descricao = textoSemParcela
-      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|no cartão de credito|no cartão|no credito|no pix|no débito|credito|debito|pix|dinheiro|reais|r\$|de |em /gi, ' ')
+      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|dia|no cartão de credito|no cartão|no credito|no pix|no débito|credito|debito|pix|dinheiro|reais|r\$|de |em /gi, ' ')
       .replace(matchValor[0], '')
       .replace(cartaoIdentificado ? new RegExp(cartaoIdentificado, 'gi') : '', '')
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (!descricao || descricao.length < 2) descricao = `${tipo === 'RECEITA' ? 'Entrada' : 'Gasto'} (${categoria})`;
+    if (!descricao || descricao.length < 2) descricao = categoria;
     descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
 
     return {
@@ -531,7 +635,11 @@ export default function App() {
       tipo,
       metodo,
       cartao_nome: cartaoIdentificado,
-      categoria
+      banco_nome: bancoIdentificado,
+      categoria,
+      pago: !isAgendado,
+      data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeIso,
+      anoMes: infoVenc ? infoVenc.anoMes : filtroMesAno
     };
   };
 
@@ -542,9 +650,16 @@ export default function App() {
     for (const dados of itens) {
       const pTotal = dados.parcelasTotal || 1;
       for (let i = 0; i < pTotal; i++) {
-        const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
-        const anoM = dataParcela.getFullYear();
-        const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+        let anoMesItem = dados.anoMes || filtroMesAno;
+        let dataVencItem = dados.data_vencimento || hojeIso;
+
+        if (pTotal > 1) {
+          const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
+          const anoM = dataParcela.getFullYear();
+          const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+          anoMesItem = `${anoM}-${mesM}`;
+          dataVencItem = `${anoM}-${mesM}-15`;
+        }
 
         await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
           descricao: pTotal > 1 ? `${dados.descricao} (${i + 1}/${pTotal})` : dados.descricao,
@@ -552,33 +667,28 @@ export default function App() {
           tipo: dados.tipo,
           metodo: dados.metodo,
           cartao_nome: dados.cartao_nome,
+          banco_nome: dados.banco_nome || bancos[0]?.nome || null,
           categoria: dados.categoria,
           parcela_atual: i + 1,
           parcelas_total: pTotal,
           fatura_paga: false,
-          anoMes: `${anoM}-${mesM}`,
+          pago: dados.pago !== undefined ? dados.pago : true,
+          data_vencimento: dataVencItem,
+          anoMes: anoMesItem,
           mensagem_original: textoOriginal,
           criadoEm: serverTimestamp()
         });
       }
 
-      let alertaExtra = '';
-      if (dados.metodo === 'CREDITO' && dados.cartao_nome) {
-        const cObj = cartoes.find(c => c.nome.toLowerCase() === dados.cartao_nome.toLowerCase());
-        if (cObj && cObj.limite > 0) {
-          const compAtual = transacoes
-            .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cObj.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
-            .reduce((a, b) => a + Number(b.valor || 0), 0) + (dados.valorParcela * pTotal);
-          const pct = Math.round((compAtual / cObj.limite) * 100);
-          const disp = cObj.limite - compAtual;
-          if (pct >= 100) alertaExtra += `\n🚨 *ALERTA:* Limite do cartão ${cObj.nome} estourado! (${pct}%)`;
-          else if (pct >= 80) alertaExtra += `\n⚠️ *Atenção:* ${pct}% do limite do ${cObj.nome} comprometido! Restam R$ ${disp.toFixed(2)}`;
-        }
+      if (dados.pago === false) {
+        resumoRespostas.push(
+          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${dados.categoria}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
+        );
+      } else {
+        resumoRespostas.push(
+          `✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} (${dados.cartao_nome || dados.metodo})`
+        );
       }
-
-      resumoRespostas.push(
-        `✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} (${dados.cartao_nome || dados.metodo})${alertaExtra}`
-      );
     }
 
     return resumoRespostas;
@@ -595,7 +705,7 @@ export default function App() {
     setProcessando(true);
 
     try {
-      // 1. Verifica se havia pergunta de forma de pagamento pendente no Simulador
+      // 1. Verifica resposta pendente de forma de pagamento
       if (pendenteSimulador && pendenteSimulador.length > 0) {
         let metodoResp = null;
         let cartaoResp = null;
@@ -624,7 +734,8 @@ export default function App() {
           const itensProntos = pendenteSimulador.map(it => ({
             ...it,
             metodo: metodoResp,
-            cartao_nome: cartaoResp
+            cartao_nome: cartaoResp,
+            pago: true
           }));
           setPendenteSimulador(null);
           const resps = await gravarItensSimulador(itensProntos, textoUsuario);
@@ -652,42 +763,35 @@ export default function App() {
         return;
       }
 
-      // 3. Consultas
-      const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|posso gastar/i.test(txtLower) && !/gastei|comprei|paguei|recebi/i.test(txtLower);
-      if (isPergunta) {
-        const transMes = transacoes.filter(t => t.anoMes === filtroMesAno);
-        const rec = transMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
-        const desp = transMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
-        const sld = rec - desp;
+      // 3. Comandos de Contas a Vencer e Próximas do Vencimento (Até 5 dias)
+      if (/proxima|proximas|5 dias/i.test(txtLower) && /conta|vencimento|vencer/i.test(txtLower)) {
+        const hojeZero = new Date(hojeIso + 'T00:00:00');
+        const limite5 = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
+        const prox = transacoes.filter(t => {
+          if (t.pago !== false || !t.data_vencimento) return false;
+          const dt = new Date(t.data_vencimento + 'T00:00:00');
+          return dt >= hojeZero && dt <= limite5;
+        });
 
-        const cartaoPerguntado = cartoes.find(c => txtLower.includes(c.nome.toLowerCase()));
-        if (cartaoPerguntado) {
-          const faturaMes = transMes
-            .filter(t => t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase() && !t.fatura_paga)
-            .reduce((a, b) => a + Number(b.valor || 0), 0);
-          const compTotal = transacoes
-            .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
-            .reduce((a, b) => a + Number(b.valor || 0), 0);
-          const disp = cartaoPerguntado.limite - compTotal;
-
-          setHistoricoChat(prev => [...prev, {
-            autor: 'bot',
-            texto: `💳 *Cartão ${cartaoPerguntado.nome} (${filtroMesAno})*\n\n` +
-                   `• Fatura do mês: *R$ ${faturaMes.toFixed(2)}*\n` +
-                   `• Limite disponível real: *R$ ${disp.toFixed(2)}*\n` +
-                   `• Melhor dia de compra: *Dia ${cartaoPerguntado.diaFechamento || 5}*`
-          }]);
-          setProcessando(false);
-          return;
+        if (prox.length === 0) {
+          setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '⏳ *Contas Próximas (Até 5 dias)*\n\n🎉 Nenhuma conta em aberto vencendo nos próximos 5 dias!' }]);
+        } else {
+          const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence: ${formatarDataBR(t.data_vencimento)})`).join('\n');
+          setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `⏳ *Contas Próximas do Vencimento (5 dias)*\n\n${linhas}` }]);
         }
+        setProcessando(false);
+        return;
+      }
 
-        setHistoricoChat(prev => [...prev, {
-          autor: 'bot',
-          texto: `📊 *Resumo Inteligente (${filtroMesAno})*\n\n` +
-                 `🟢 Receitas: R$ ${rec.toFixed(2)}\n` +
-                 `🔴 Despesas: R$ ${desp.toFixed(2)}\n` +
-                 `💰 *Saldo Atual: R$ ${sld.toFixed(2)}*`
-        }]);
+      if (/contas a vencer|contas em aberto|o que vence/i.test(txtLower)) {
+        const abertas = transacoes.filter(t => t.anoMes === filtroMesAno && t.pago === false);
+        if (abertas.length === 0) {
+          setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `📅 *Contas a Vencer (${filtroMesAno})*\n\n✅ Nenhuma conta em aberto neste mês!` }]);
+        } else {
+          const totalAb = abertas.reduce((a, b) => a + Number(b.valor || 0), 0);
+          const linhas = abertas.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} — Vence: *${formatarDataBR(t.data_vencimento)}*`).join('\n');
+          setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `📅 *Contas em Aberto (${filtroMesAno})*\n\n${linhas}\n\n📌 *Total em aberto:* R$ ${totalAb.toFixed(2)}` }]);
+        }
         setProcessando(false);
         return;
       }
@@ -700,14 +804,14 @@ export default function App() {
       if (itensExtraidos.length === 0) {
         setHistoricoChat(prev => [...prev, { 
           autor: 'bot', 
-          texto: '🤔 Não identifiquei valores. Tente:\n• "Gastei 45 na padaria"\n• "Qual meu saldo?"\n• "desfazer"' 
+          texto: '🤔 Não identifiquei valores. Tente:\n• "Água vence 25/10 valor 80,00"\n• "contas a vencer"\n• "contas proximas do vencimento"' 
         }]);
         setProcessando(false);
         return;
       }
 
-      const comMetodo = itensExtraidos.filter(i => i.metodo);
-      const semMetodo = itensExtraidos.filter(i => !i.metodo);
+      const comMetodo = itensExtraidos.filter(i => i.metodo || i.pago === false);
+      const semMetodo = itensExtraidos.filter(i => !i.metodo && i.pago !== false);
 
       let respostasFinais = [];
 
@@ -796,11 +900,19 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS PREDITIVOS, CARTÕES E ALERTAS DE VENCIMENTO
+  // CÁLCULOS GERAIS, SALDOS POR CONTA, CARTÕES E EXTRATO DE MOVIMENTAÇÃO
   // ==========================================================================
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
-  const totalReceitas = transacoesFiltradas.filter(t => t.tipo === 'RECEITA').reduce((acc, t) => acc + Number(t.valor || 0), 0);
-  const totalDespesas = transacoesFiltradas.filter(t => t.tipo === 'DESPESA').reduce((acc, t) => acc + Number(t.valor || 0), 0);
+  
+  // Receitas e Despesas efetivadas do mês (exclui transferências de pagamento de fatura para não duplicar com gastos do cartão no resumo)
+  const totalReceitas = transacoesFiltradas
+    .filter(t => t.tipo === 'RECEITA' && t.pago !== false)
+    .reduce((acc, t) => acc + Number(t.valor || 0), 0);
+
+  const totalDespesas = transacoesFiltradas
+    .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA')
+    .reduce((acc, t) => acc + Number(t.valor || 0), 0);
+
   const saldoAtual = totalReceitas - totalDespesas;
 
   const [anoSel, mesSel] = filtroMesAno.split('-').map(Number);
@@ -811,16 +923,28 @@ export default function App() {
   const projecaoDespesasMes = isMesAtual ? gastoMedioDiario * totalDiasNoMes : totalDespesas;
   const projecaoSaldoFimMes = totalReceitas - projecaoDespesasMes;
 
-  const metaAporte = totalReceitas * 0.20;
-  const taxaPoupancaAtual = totalReceitas > 0 ? Math.max(Math.round(((totalReceitas - totalDespesas) / totalReceitas) * 100), 0) : 0;
+  // Cálculo de Saldos de cada Conta Bancária
+  const saldosPorBanco = bancos.map((b, index) => {
+    const entradasBanco = transacoes
+      .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
+      .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
-  const dataProxMes = new Date(anoSel, mesSel, 1);
-  const proxMesStr = `${dataProxMes.getFullYear()}-${String(dataProxMes.getMonth() + 1).padStart(2, '0')}`;
-  const comprometidoProxMes = transacoes
-    .filter(t => t.anoMes === proxMesStr && t.tipo === 'DESPESA')
-    .reduce((acc, t) => acc + Number(t.valor || 0), 0);
+    const saidasBanco = transacoes
+      .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO' && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
+      .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
-  // Cálculo detalhado de cada cartão (Fatura do Mês + Limite Total Comprometido com Parcelas Futuras)
+    const saldoAtualConta = Number(b.saldoInicial || 0) + entradasBanco - saidasBanco;
+    return {
+      ...b,
+      entradasBanco,
+      saidasBanco,
+      saldoAtualConta
+    };
+  });
+
+  const saldoTotalBancos = saldosPorBanco.reduce((acc, b) => acc + b.saldoAtualConta, 0);
+
+  // Cálculo detalhado dos Cartões de Crédito
   const resumoCartoes = cartoes.map(c => {
     const faturaMes = transacoesFiltradas
       .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga)
@@ -837,19 +961,75 @@ export default function App() {
 
     return {
       ...c,
-      faturaMes,
-      comprometidoTotal,
+      faturaMes: Math.max(faturaMes, 0),
+      comprometidoTotal: Math.max(comprometidoTotal, 0),
       disponivel,
-      pctUso,
+      pctUso: Math.max(pctUso, 0),
       estourado: comprometidoTotal > limite,
       alerta80: pctUso >= 80,
       isMelhorDiaHoje
     };
   });
 
+  // Construção do Extrato de Movimentação (Incluindo Linha Consolidada da Fatura no Dia do Vencimento)
+  const faturasConsolidadasNoExtrato = resumoCartoes
+    .filter(c => c.faturaMes > 0)
+    .map(c => {
+      const diaVencStr = String(c.diaVencimento || 12).padStart(2, '0');
+      return {
+        id: `fatura-${c.id}-${filtroMesAno}`,
+        descricao: `Fatura Consolidada Cartão ${c.nome} (Vencimento)`,
+        valor: c.faturaMes,
+        tipo: 'FATURA_CARTAO',
+        metodo: 'FATURA DO MÊS',
+        cartao_nome: c.nome,
+        categoria: 'Fatura Cartão',
+        data_vencimento: `${filtroMesAno}-${diaVencStr}`,
+        anoMes: filtroMesAno,
+        pago: false,
+        isLinhaFatura: true
+      };
+    });
+
+  const listaMovimentacaoExtrato = [...transacoesFiltradas, ...faturasConsolidadasNoExtrato]
+    .filter(item => {
+      if (pesquisaExtrato && !item.descricao?.toLowerCase().includes(pesquisaExtrato.toLowerCase()) && !item.categoria?.toLowerCase().includes(pesquisaExtrato.toLowerCase())) {
+        return false;
+      }
+      if (filtroTipoExtrato === 'RECEITA') return item.tipo === 'RECEITA';
+      if (filtroTipoExtrato === 'DESPESA') return item.tipo === 'DESPESA' && item.metodo !== 'CREDITO';
+      if (filtroTipoExtrato === 'CREDITO') return item.metodo === 'CREDITO';
+      if (filtroTipoExtrato === 'FATURA') return item.isLinhaFatura;
+      return true;
+    })
+    .sort((a, b) => (b.data_vencimento || '').localeCompare(a.data_vencimento || ''));
+
+  // Filtros da Aba "Contas a Vencer e a Receber"
+  const hojeZero = new Date(hojeIso + 'T00:00:00');
+  const limite5Dias = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
+
+  const listaContasVencerReceber = transacoesFiltradas
+    .filter(t => {
+      if (t.metodo === 'CREDITO') return false; // Compras no cartão já ficam na fatura
+      if (filtroVencNome && !t.descricao?.toLowerCase().includes(filtroVencNome.toLowerCase())) return false;
+      if (filtroVencCat !== 'TODAS' && t.categoria !== filtroVencCat) return false;
+      if (filtroVencStatus === 'ABERTO' && t.pago !== false) return false;
+      if (filtroVencStatus === 'PAGO' && t.pago === false) return false;
+      if (filtroVencData === 'PROXIMOS_5_DIAS') {
+        const dt = new Date((t.data_vencimento || hojeIso) + 'T00:00:00');
+        return dt >= hojeZero && dt <= limite5Dias;
+      }
+      if (filtroVencData === 'VENCIDOS') {
+        const dt = new Date((t.data_vencimento || hojeIso) + 'T00:00:00');
+        return dt < hojeZero && t.pago === false;
+      }
+      return true;
+    })
+    .sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
+
   const despesasPorCategoria = categorias.map(cat => {
     const total = transacoesFiltradas
-      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat)
+      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA')
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
     return { name: cat, value: total };
   }).filter(item => item.value > 0);
@@ -862,7 +1042,79 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col md:flex-row font-sans selection:bg-emerald-500 selection:text-slate-950">
       
-      {/* MODAL DE EDIÇÃO DE COMPRA / TRANSAÇÃO */}
+      {/* MODAL DE PAGAMENTO TOTAL OU PARCIAL DA FATURA */}
+      {modalPagarFatura && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-base text-slate-100 flex items-center gap-2">
+                <CreditCard className="w-5 h-5 text-emerald-400" /> Pagar Fatura — {modalPagarFatura.cartaoNome}
+              </h3>
+              <button onClick={() => setModalPagarFatura(null)} className="text-slate-400 hover:text-slate-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={confirmarPagamentoFatura} className="space-y-4">
+              <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-xl flex justify-between items-center">
+                <span className="text-xs text-slate-400">Total da Fatura ({filtroMesAno}):</span>
+                <strong className="text-base text-rose-400">R$ {modalPagarFatura.valorFatura.toFixed(2)}</strong>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setModalPagarFatura({ ...modalPagarFatura, tipoPagamento: 'TOTAL', valorPago: modalPagarFatura.valorFatura.toFixed(2) })}
+                  className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition ${modalPagarFatura.tipoPagamento === 'TOTAL' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-950 text-slate-400 border-slate-800'}`}
+                >
+                  Pagar Valor Total
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModalPagarFatura({ ...modalPagarFatura, tipoPagamento: 'PARCIAL', valorPago: '' })}
+                  className={`py-2.5 px-3 rounded-xl text-xs font-bold border transition ${modalPagarFatura.tipoPagamento === 'PARCIAL' ? 'bg-amber-500 text-slate-950 border-amber-400' : 'bg-slate-950 text-slate-400 border-slate-800'}`}
+                >
+                  Pagar Valor Parcial
+                </button>
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Valor a Pagar (R$)</label>
+                <input 
+                  type="number" step="0.01" required
+                  disabled={modalPagarFatura.tipoPagamento === 'TOTAL'}
+                  value={modalPagarFatura.valorPago}
+                  onChange={e => setModalPagarFatura({ ...modalPagarFatura, valorPago: e.target.value })}
+                  placeholder="Digite o valor parcial..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200 disabled:opacity-60"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Descontar saldo de qual Conta Bancária?</label>
+                <select
+                  value={modalPagarFatura.bancoSaida}
+                  onChange={e => setModalPagarFatura({ ...modalPagarFatura, bancoSaida: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                >
+                  {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                </select>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button type="submit" className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs">
+                  Confirmar Pagamento
+                </button>
+                <button type="button" onClick={() => setModalPagarFatura(null)} className="px-4 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-xs">
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE EDIÇÃO DE LANÇAMENTO */}
       {transacaoEditando && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
@@ -893,6 +1145,16 @@ export default function App() {
                   />
                 </div>
                 <div>
+                  <label className="text-xs text-slate-400 block mb-1">Data / Vencimento</label>
+                  <input 
+                    type="date" value={transacaoEditando.data_vencimento || hojeIso} 
+                    onChange={e => setTransacaoEditando({ ...transacaoEditando, data_vencimento: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
                   <label className="text-xs text-slate-400 block mb-1">Categoria</label>
                   <select 
                     value={transacaoEditando.categoria}
@@ -902,33 +1164,17 @@ export default function App() {
                     {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                   </select>
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-slate-400 block mb-1">Forma de Pagamento</label>
+                  <label className="text-xs text-slate-400 block mb-1">Status</label>
                   <select 
-                    value={transacaoEditando.metodo}
-                    onChange={e => setTransacaoEditando({ ...transacaoEditando, metodo: e.target.value })}
+                    value={transacaoEditando.pago ? 'PAGO' : 'ABERTO'}
+                    onChange={e => setTransacaoEditando({ ...transacaoEditando, pago: e.target.value === 'PAGO' })}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
                   >
-                    <option value="PIX">PIX</option>
-                    <option value="DEBITO">Débito</option>
-                    <option value="CREDITO">Cartão de Crédito</option>
-                    <option value="DINHEIRO">Dinheiro</option>
+                    <option value="PAGO">Pago / Recebido</option>
+                    <option value="ABERTO">Em Aberto (A Vencer)</option>
                   </select>
                 </div>
-                {transacaoEditando.metodo === 'CREDITO' && (
-                  <div>
-                    <label className="text-xs text-slate-400 block mb-1">Cartão</label>
-                    <select 
-                      value={transacaoEditando.cartao_nome || cartoes[0]?.nome}
-                      onChange={e => setTransacaoEditando({ ...transacaoEditando, cartao_nome: e.target.value })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
-                    >
-                      {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
-                    </select>
-                  </div>
-                )}
               </div>
               <div className="flex gap-2 pt-2">
                 <button type="submit" className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs">
@@ -946,7 +1192,7 @@ export default function App() {
       {/* SIDEBAR MODERNA */}
       <aside className="w-full md:w-72 bg-slate-900/50 backdrop-blur-xl border-r border-slate-800/80 p-6 flex flex-col justify-between">
         <div>
-          <div className="flex items-center gap-3.5 mb-10">
+          <div className="flex items-center gap-3.5 mb-8">
             <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center text-slate-950 font-bold shadow-lg shadow-emerald-500/20">
               <Wallet className="w-5 h-5" />
             </div>
@@ -958,28 +1204,41 @@ export default function App() {
             </div>
           </div>
 
-          <nav className="space-y-1.5">
-            <button onClick={() => setAbaAtiva('dashboard')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'dashboard' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+          <nav className="space-y-1">
+            <button onClick={() => setAbaAtiva('dashboard')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'dashboard' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <BarChart2 className="w-4 h-4" /> Dashboard & IA
             </button>
-            <button onClick={() => setAbaAtiva('cartoes')} className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'cartoes' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+            <button onClick={() => setAbaAtiva('movimentacao')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'movimentacao' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+              <FileText className="w-4 h-4" /> Movimentação (Extrato)
+            </button>
+            <button onClick={() => setAbaAtiva('vencimentos')} className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'vencimentos' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <span className="flex items-center gap-3">
-                <CreditCard className="w-4 h-4" /> Cartões & Faturas
+                <Clock className="w-4 h-4" /> A Vencer & Receber
               </span>
-              {resumoCartoes.some(c => c.alerta80) && (
-                <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" title="Alerta de limite de cartão!"></span>
+              {transacoesFiltradas.some(t => t.pago === false) && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold">
+                  {transacoesFiltradas.filter(t => t.pago === false).length}
+                </span>
               )}
             </button>
-            <button onClick={() => setAbaAtiva('bancos')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'bancos' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+            <button onClick={() => setAbaAtiva('saldos')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'saldos' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+              <Wallet className="w-4 h-4" /> Saldos das Contas
+            </button>
+            <button onClick={() => setAbaAtiva('cartoes')} className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'cartoes' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+              <span className="flex items-center gap-3">
+                <CreditCard className="w-4 h-4" /> Cartões de Crédito
+              </span>
+              {resumoCartoes.some(c => c.alerta80) && (
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping"></span>
+              )}
+            </button>
+            <button onClick={() => setAbaAtiva('bancos')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'bancos' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <Landmark className="w-4 h-4" /> Cadastro Bancos/Cartões
             </button>
-            <button onClick={() => setAbaAtiva('fixas')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'fixas' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
-              <Receipt className="w-4 h-4" /> Contas Fixas & Alertas
-            </button>
-            <button onClick={() => setAbaAtiva('categorias')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'categorias' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+            <button onClick={() => setAbaAtiva('categorias')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'categorias' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <FolderPlus className="w-4 h-4" /> Categorias & Limites
             </button>
-            <button onClick={() => setAbaAtiva('whatsapp')} className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'whatsapp' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+            <button onClick={() => setAbaAtiva('whatsapp')} className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'whatsapp' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <span className="flex items-center gap-3">
                 <QrCode className="w-4 h-4" /> Conexão WhatsApp
               </span>
@@ -1014,7 +1273,6 @@ export default function App() {
                 <div>
                   <h4 className="text-sm font-bold text-amber-300 flex items-center gap-2">
                     WhatsApp Desconectado
-                    <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full uppercase">Ação Necessária</span>
                   </h4>
                   <p className="text-xs text-slate-300 mt-0.5">
                     Conecte o QR Code para receber alertas de vencimento e lançar gastos pelo celular.
@@ -1024,7 +1282,7 @@ export default function App() {
               {abaAtiva !== 'whatsapp' && (
                 <button 
                   onClick={() => setAbaAtiva('whatsapp')}
-                  className="w-full sm:w-auto bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs px-4 py-2.5 rounded-xl transition whitespace-nowrap shadow-lg shadow-amber-500/20"
+                  className="w-full sm:w-auto bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs px-4 py-2.5 rounded-xl transition whitespace-nowrap"
                 >
                   Conectar Agora
                 </button>
@@ -1072,20 +1330,20 @@ export default function App() {
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
-                  <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Saldo do Mês</span>
+                  <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado do Mês</span>
                   <p className={`text-2xl font-bold mt-1.5 tracking-tight ${saldoAtual >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                     R$ {saldoAtual.toFixed(2)}
                   </p>
                 </div>
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
                   <span className="text-xs text-slate-400 font-medium uppercase tracking-wider flex items-center gap-1.5">
-                    <TrendingUp className="w-3.5 h-3.5 text-emerald-400" /> Receitas
+                    <TrendingUp className="w-3.5 h-3.5 text-emerald-400" /> Receitas Efetivadas
                   </span>
                   <p className="text-2xl font-bold mt-1.5 text-slate-100 tracking-tight">R$ {totalReceitas.toFixed(2)}</p>
                 </div>
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
                   <span className="text-xs text-slate-400 font-medium uppercase tracking-wider flex items-center gap-1.5">
-                    <TrendingDown className="w-3.5 h-3.5 text-rose-400" /> Despesas
+                    <TrendingDown className="w-3.5 h-3.5 text-rose-400" /> Despesas Totais
                   </span>
                   <p className="text-2xl font-bold mt-1.5 text-slate-100 tracking-tight">R$ {totalDespesas.toFixed(2)}</p>
                 </div>
@@ -1095,85 +1353,41 @@ export default function App() {
               <div className="bg-gradient-to-br from-emerald-950/30 via-slate-900/80 to-slate-900/80 border border-emerald-500/20 p-5 rounded-2xl space-y-4 shadow-xl">
                 <div className="flex items-center justify-between">
                   <h2 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
-                    <BrainCircuit className="w-4 h-4 text-emerald-400" /> Diagnóstico & Inteligência Preditiva
+                    <BrainCircuit className="w-4 h-4 text-emerald-400" /> Diagnóstico & Saldos Rápidos
                   </h2>
-                  <span className="text-[11px] bg-emerald-500/10 text-emerald-400 px-2.5 py-0.5 rounded-full border border-emerald-500/20 font-medium">
-                    Tempo Real
-                  </span>
+                  <button onClick={() => setAbaAtiva('saldos')} className="text-xs text-emerald-400 hover:underline">
+                    Ver Saldos por Banco →
+                  </button>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Saldo Geral em Contas</span>
+                    <p className="text-lg font-bold text-emerald-400 mt-1">R$ {saldoTotalBancos.toFixed(2)}</p>
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      Soma de {bancos.length} conta(s) bancária(s)
+                    </p>
+                  </div>
+
+                  <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Ritmo Diário (Burn Rate)</span>
                     <p className="text-lg font-bold text-slate-100 mt-1">R$ {gastoMedioDiario.toFixed(2)} <span className="text-xs font-normal text-slate-400">/dia</span></p>
                     <p className="text-[11px] text-slate-400 mt-1.5">
-                      Projeção até dia {totalDiasNoMes}: <strong className={projecaoSaldoFimMes >= 0 ? 'text-emerald-400' : 'text-rose-400'}>R$ {projecaoDespesasMes.toFixed(2)}</strong>
+                      Projeção fim do mês: <strong className={projecaoSaldoFimMes >= 0 ? 'text-emerald-400' : 'text-rose-400'}>R$ {projecaoDespesasMes.toFixed(2)}</strong>
                     </p>
                   </div>
 
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
-                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Potencial de Aporte (20%)</span>
-                    <p className="text-lg font-bold text-emerald-400 mt-1">R$ {metaAporte.toFixed(2)}</p>
-                    <p className="text-[11px] text-slate-400 mt-1.5">
-                      Taxa de poupança atual: <strong className="text-slate-200">{taxaPoupancaAtual}%</strong> da renda
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas em Aberto ({filtroMesAno})</span>
+                    <p className="text-lg font-bold text-amber-400 mt-1">
+                      R$ {transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0).toFixed(2)}
                     </p>
-                  </div>
-
-                  <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
-                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Faturas Mês Seguinte</span>
-                    <p className="text-lg font-bold text-amber-400 mt-1">R$ {comprometidoProxMes.toFixed(2)}</p>
-                    <p className="text-[11px] text-slate-400 mt-1.5">
-                      Já comprometido em {proxMesStr}
-                    </p>
+                    <button onClick={() => setAbaAtiva('vencimentos')} className="text-[11px] text-emerald-400 hover:underline mt-1.5 block">
+                      Gerenciar vencimentos →
+                    </button>
                   </div>
                 </div>
               </div>
-
-              {/* CHECKLIST DE CONTAS FIXAS */}
-              {contasFixas.length > 0 && (
-                <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3.5 shadow-xl">
-                  <div className="flex justify-between items-center">
-                    <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                      <Clock className="w-4 h-4 text-amber-400" /> Checklist de Contas Fixas ({filtroMesAno})
-                    </h2>
-                    <button onClick={() => setAbaAtiva('fixas')} className="text-xs text-emerald-400 hover:underline">
-                      + Configurar alertas
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {contasFixas.map(cf => {
-                      const jaPaga = transacoesFiltradas.some(
-                        t => t.conta_fixa_id === cf.id || t.descricao?.toLowerCase().includes(cf.nome.toLowerCase())
-                      );
-                      const venceHoje = Number(cf.diaVencimento) === diaHoje && !jaPaga;
-                      return (
-                        <div key={cf.id} className={`p-3.5 rounded-xl border flex items-center justify-between ${jaPaga ? 'bg-emerald-950/15 border-emerald-500/30' : venceHoje ? 'bg-rose-950/20 border-rose-500/40' : 'bg-slate-950/70 border-slate-800'}`}>
-                          <div>
-                            <p className="text-sm font-medium text-slate-200 flex items-center gap-1.5">
-                              {cf.nome}
-                              {venceHoje && <span className="text-[10px] bg-rose-500 text-slate-950 font-bold px-2 py-0.5 rounded-full">VENCE HOJE</span>}
-                            </p>
-                            <p className="text-xs text-slate-400">Todo dia {cf.diaVencimento} • R$ {Number(cf.valorPadrao).toFixed(2)}</p>
-                          </div>
-                          {jaPaga ? (
-                            <span className="flex items-center gap-1 text-xs text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-1 rounded-lg">
-                              <CheckCircle2 className="w-3.5 h-3.5" /> Pago
-                            </span>
-                          ) : (
-                            <button 
-                              onClick={() => pagarContaFixaRapido(cf)}
-                              className="text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold px-3 py-1.5 rounded-lg transition flex items-center gap-1"
-                            >
-                              <Zap className="w-3 h-3" /> Dar Baixa
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
 
               {/* LIMITES POR CATEGORIA */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
@@ -1184,7 +1398,7 @@ export default function App() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   {categorias.filter(cat => cat !== 'Receita').map(cat => {
                     const gastoCat = transacoesFiltradas
-                      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat)
+                      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA')
                       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
                     
                     const limite = orcamentos[cat] || 0;
@@ -1261,59 +1475,328 @@ export default function App() {
                   </div>
                 </div>
               </div>
-
-              {/* LISTA DE TRANSAÇÕES COM BOTÃO EDITAR */}
-              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
-                <h2 className="text-sm font-semibold text-slate-200 mb-4">Lançamentos de {filtroMesAno}</h2>
-                {transacoesFiltradas.length === 0 ? (
-                  <p className="text-sm text-slate-500 py-6 text-center">Nenhum lançamento encontrado neste período.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {transacoesFiltradas.map(t => (
-                      <div key={t.id} className="flex items-center justify-between bg-slate-950/60 p-4 rounded-xl border border-slate-800/60 hover:border-slate-700/80 transition">
-                        <div className="flex items-center gap-3.5">
-                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${t.tipo === 'RECEITA' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                            {t.tipo === 'RECEITA' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                          </div>
-                          <div>
-                            <p className="font-medium text-sm text-slate-200 flex items-center gap-2">
-                              {t.descricao}
-                              {t.fatura_paga && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full">Fatura Paga</span>}
-                            </p>
-                            <p className="text-xs text-slate-400 mt-0.5">{t.categoria} • <span className="text-slate-300 font-medium">{t.cartao_nome || t.metodo}</span></p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <span className={`font-bold text-sm tracking-tight ${t.tipo === 'RECEITA' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {t.tipo === 'RECEITA' ? '+' : '-'} R$ {Number(t.valor).toFixed(2)}
-                          </span>
-                          <button onClick={() => setTransacaoEditando(t)} className="text-slate-500 hover:text-sky-400 transition p-1" title="Editar lançamento">
-                            <Edit3 className="w-4 h-4" />
-                          </button>
-                          <button onClick={() => excluirTransacao(t.id)} className="text-slate-500 hover:text-rose-400 transition p-1" title="Excluir">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
             </>
           )}
 
           {/* ================================================================
-              ABA 2: CARTÃO DE CRÉDITO COMPLETA (FATURAS, MELHOR DIA, PARCELADO)
+              ABA 2: MOVIMENTAÇÃO (EXTRATO BANCÁRIO + FATURA NO DIA DO VENCIMENTO)
+          ================================================================ */}
+          {abaAtiva === 'movimentacao' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
+                <div>
+                  <h2 className="text-lg font-bold flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-emerald-400" /> Extrato de Movimentação ({filtroMesAno})
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Entradas, saídas, compras no cartão e o valor total da fatura projetado no dia do vencimento.
+                  </p>
+                </div>
+                <input 
+                  type="month" value={filtroMesAno} onChange={e => setFiltroMesAno(e.target.value)} 
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-emerald-400 font-semibold"
+                />
+              </div>
+
+              {/* BARRA DE PESQUISA E FILTROS DO EXTRATO */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3" />
+                  <input 
+                    type="text" placeholder="Pesquisar por nome ou categoria no extrato..."
+                    value={pesquisaExtrato} onChange={e => setPesquisaExtrato(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {[
+                    { id: 'TODOS', label: 'Todos' },
+                    { id: 'RECEITA', label: '🟢 Entradas' },
+                    { id: 'DESPESA', label: '🔴 Saídas (Pix/Débito)' },
+                    { id: 'CREDITO', label: '💳 Compras no Crédito' },
+                    { id: 'FATURA', label: '📅 Faturas no Dia do Vencimento' }
+                  ].map(f => (
+                    <button
+                      key={f.id} onClick={() => setFiltroTipoExtrato(f.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${filtroTipoExtrato === f.id ? 'bg-emerald-500 text-slate-950' : 'bg-slate-950 text-slate-400 border border-slate-800'}`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* LISTA ESTILO EXTRATO */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3 shadow-xl">
+                {listaMovimentacaoExtrato.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-8 text-center">Nenhuma movimentação encontrada para este filtro.</p>
+                ) : (
+                  listaMovimentacaoExtrato.map(item => (
+                    <div 
+                      key={item.id} 
+                      className={`flex items-center justify-between p-4 rounded-xl border transition ${
+                        item.isLinhaFatura 
+                          ? 'bg-amber-500/10 border-amber-500/40' 
+                          : 'bg-slate-950/70 border-slate-800/80'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3.5">
+                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                          item.isLinhaFatura 
+                            ? 'bg-amber-500/20 text-amber-400' 
+                            : item.tipo === 'RECEITA' 
+                              ? 'bg-emerald-500/10 text-emerald-400' 
+                              : 'bg-rose-500/10 text-rose-400'
+                        }`}>
+                          {item.isLinhaFatura ? <CreditCard className="w-4 h-4" /> : item.tipo === 'RECEITA' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                        </div>
+                        <div>
+                          <p className="font-semibold text-sm text-slate-100 flex items-center gap-2 flex-wrap">
+                            {item.descricao}
+                            {item.isLinhaFatura && (
+                              <span className="text-[10px] bg-amber-500 text-slate-950 font-bold px-2 py-0.5 rounded-full">
+                                TOTAL DA FATURA NO VENCIMENTO
+                              </span>
+                            )}
+                            {!item.isLinhaFatura && item.pago === false && (
+                              <span className="text-[10px] bg-rose-500/20 text-rose-300 border border-rose-500/30 px-2 py-0.5 rounded-full">
+                                Em Aberto
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            Data/Venc: <strong>{formatarDataBR(item.data_vencimento)}</strong> • {item.categoria} • <span className="text-slate-300">{item.cartao_nome || item.banco_nome || item.metodo}</span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <span className={`font-bold text-sm ${item.isLinhaFatura ? 'text-amber-400' : item.tipo === 'RECEITA' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {item.tipo === 'RECEITA' ? '+' : '-'} R$ {Number(item.valor || 0).toFixed(2)}
+                        </span>
+                        {!item.isLinhaFatura && (
+                          <>
+                            <button onClick={() => setTransacaoEditando(item)} className="text-slate-400 hover:text-sky-400 p-1">
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => excluirTransacao(item.id)} className="text-slate-500 hover:text-rose-400 p-1">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              ABA 3: CONTAS A VENCER E A RECEBER (COM FILTROS E AGENDAMENTO)
+          ================================================================ */}
+          {abaAtiva === 'vencimentos' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-4 shadow-xl">
+                <div>
+                  <h2 className="text-lg font-bold flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-amber-400" /> Lançar Conta a Vencer ou Valor a Receber
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Cadastre boletos futuros ou valores a receber. Pelo WhatsApp basta enviar: <em>"Água vence 25/10 valor 80,00"</em>.
+                  </p>
+                </div>
+
+                <form onSubmit={lancarContaAgendada} className="grid grid-cols-1 sm:grid-cols-6 gap-3">
+                  <input 
+                    type="text" required placeholder="Descrição (ex: Conta de Água)" value={formAgendamento.descricao}
+                    onChange={e => setFormAgendamento({ ...formAgendamento, descricao: e.target.value })}
+                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                  />
+                  <input 
+                    type="number" step="0.01" required placeholder="Valor (R$)" value={formAgendamento.valor}
+                    onChange={e => setFormAgendamento({ ...formAgendamento, valor: e.target.value })}
+                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                  />
+                  <input 
+                    type="date" required value={formAgendamento.data_vencimento}
+                    onChange={e => setFormAgendamento({ ...formAgendamento, data_vencimento: e.target.value })}
+                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                  />
+                  <select 
+                    value={formAgendamento.tipo}
+                    onChange={e => setFormAgendamento({ ...formAgendamento, tipo: e.target.value })}
+                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                  >
+                    <option value="DESPESA">🔴 Conta a Pagar</option>
+                    <option value="RECEITA">🟢 Valor a Receber</option>
+                  </select>
+                  <select 
+                    value={formAgendamento.categoria}
+                    onChange={e => setFormAgendamento({ ...formAgendamento, categoria: e.target.value })}
+                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                  >
+                    {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                  </select>
+                  <button type="submit" className="sm:col-span-6 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
+                    + Agendar Conta com Vencimento
+                  </button>
+                </form>
+              </div>
+
+              {/* FILTROS POR NOME, CATEGORIA, VENCIMENTO E STATUS */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-4 rounded-2xl grid grid-cols-1 sm:grid-cols-4 gap-3 shadow-xl">
+                <input 
+                  type="text" placeholder="🔍 Filtrar por nome..." value={filtroVencNome}
+                  onChange={e => setFiltroVencNome(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200"
+                />
+                <select 
+                  value={filtroVencCat} onChange={e => setFiltroVencCat(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200"
+                >
+                  <option value="TODAS">Todas as Categorias</option>
+                  {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                </select>
+                <select 
+                  value={filtroVencStatus} onChange={e => setFiltroVencStatus(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200"
+                >
+                  <option value="TODOS">Status: Todos</option>
+                  <option value="ABERTO">⏳ Em Aberto (A Vencer)</option>
+                  <option value="PAGO">✅ Pago / Recebido</option>
+                </select>
+                <select 
+                  value={filtroVencData} onChange={e => setFiltroVencData(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200"
+                >
+                  <option value="TODOS">Vencimento: Todo o Mês</option>
+                  <option value="PROXIMOS_5_DIAS">🔥 Próximos 5 Dias</option>
+                  <option value="VENCIDOS">🚨 Atrasados / Vencidos</option>
+                </select>
+              </div>
+
+              {/* LISTA DE CONTAS A VENCER E A RECEBER */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3 shadow-xl">
+                {listaContasVencerReceber.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-8 text-center">Nenhuma conta encontrada para os filtros selecionados.</p>
+                ) : (
+                  listaContasVencerReceber.map(t => (
+                    <div key={t.id} className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${t.pago ? 'bg-emerald-950/10 border-emerald-500/20' : 'bg-slate-950/80 border-amber-500/30'}`}>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${t.tipo === 'RECEITA' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                            {t.tipo === 'RECEITA' ? 'A RECEBER' : 'A PAGAR'}
+                          </span>
+                          <p className="font-semibold text-sm text-slate-100">{t.descricao}</p>
+                          <span className="text-xs text-slate-400">({t.categoria})</span>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1">
+                          Vencimento: <strong className="text-amber-300">{formatarDataBR(t.data_vencimento)}</strong> • Status: <strong>{t.pago ? 'Pago / Recebido' : 'Em Aberto'}</strong>
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3 self-end sm:self-center">
+                        <span className={`font-bold text-sm ${t.tipo === 'RECEITA' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          R$ {Number(t.valor || 0).toFixed(2)}
+                        </span>
+                        <button
+                          onClick={() => alternarStatusPago(t)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition ${
+                            t.pago 
+                              ? 'bg-slate-800 text-emerald-400 hover:bg-slate-700' 
+                              : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                          }`}
+                        >
+                          {t.pago ? <><CheckCircle2 className="w-3.5 h-3.5" /> Pago</> : <><Zap className="w-3.5 h-3.5" /> Dar Baixa</>}
+                        </button>
+                        <button onClick={() => setTransacaoEditando(t)} className="text-slate-400 hover:text-sky-400 p-1">
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => excluirTransacao(t.id)} className="text-slate-500 hover:text-rose-400 p-1">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              ABA 4: SALDOS DAS CONTAS BANCÁRIAS
+          ================================================================ */}
+          {abaAtiva === 'saldos' && (
+            <div className="space-y-6">
+              <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border border-emerald-500/30 p-6 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
+                <div>
+                  <span className="text-xs uppercase font-bold tracking-wider text-emerald-400">Patrimônio Líquido Disponível</span>
+                  <h2 className="text-3xl font-bold text-slate-100 mt-1">R$ {saldoTotalBancos.toFixed(2)}</h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Calculado a partir do Saldo Inicial + Entradas Recebidas - Saídas Efetivadas de cada conta.
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setAbaAtiva('bancos')}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2.5 rounded-xl text-xs font-semibold transition"
+                >
+                  + Gerenciar Contas / Saldo Inicial
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {saldosPorBanco.map(b => (
+                  <div key={b.id} className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <span className="text-[10px] uppercase font-bold text-sky-400">{b.tipo}</span>
+                        <h3 className="text-lg font-bold text-slate-100">{b.nome}</h3>
+                      </div>
+                      <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center">
+                        <Landmark className="w-5 h-5" />
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-950/80 border border-slate-800/80 p-4 rounded-xl">
+                      <span className="text-xs text-slate-400 block">Saldo Atual Disponível</span>
+                      <strong className={`text-2xl font-bold ${b.saldoAtualConta >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        R$ {b.saldoAtualConta.toFixed(2)}
+                      </strong>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2 text-center text-xs bg-slate-950/50 p-3 rounded-xl border border-slate-800/50">
+                      <div>
+                        <span className="block text-[10px] text-slate-500">Saldo Inicial</span>
+                        <strong className="text-slate-300">R$ {Number(b.saldoInicial || 0).toFixed(2)}</strong>
+                      </div>
+                      <div className="border-x border-slate-800">
+                        <span className="block text-[10px] text-slate-500">Entradas</span>
+                        <strong className="text-emerald-400">+ R$ {b.entradasBanco.toFixed(2)}</strong>
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-slate-500">Saídas</span>
+                        <strong className="text-rose-400">- R$ {b.saidasBanco.toFixed(2)}</strong>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              ABA 5: CARTÃO DE CRÉDITO COMPLETA (FATURAS + MODAL TOTAL/PARCIAL)
           ================================================================ */}
           {abaAtiva === 'cartoes' && (
             <div className="space-y-6">
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
                 <div>
                   <h2 className="text-lg font-bold flex items-center gap-2">
-                    <CreditCard className="w-5 h-5 text-emerald-400" /> Gestão de Cartões de Crédito & Faturas
+                    <CreditCard className="w-5 h-5 text-emerald-400" /> Cartões de Crédito & Faturas
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    O limite disponível deduz automaticamente compras à vista e parcelas futuras em aberto.
+                    Pague o valor total ou parcial da fatura, acompanhe o melhor dia de compra e o limite disponível real.
                   </p>
                 </div>
                 <input 
@@ -1333,20 +1816,19 @@ export default function App() {
                           {c.nome}
                           {c.isMelhorDiaHoje && (
                             <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-semibold">
-                              ⭐ Ótimo dia p/ compra
+                              ⭐ Melhor Dia
                             </span>
                           )}
                         </h3>
                       </div>
                       <button 
-                        onClick={() => pagarFaturaCartao(c.nome)}
-                        className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs px-3 py-2 rounded-xl transition shadow-md shadow-emerald-500/10"
+                        onClick={() => abrirModalPagamentoFatura(c)}
+                        className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs px-3.5 py-2 rounded-xl transition shadow-md shadow-emerald-500/10"
                       >
-                        Pagar / Antecipar Fatura
+                        Pagar Fatura (Total/Parcial)
                       </button>
                     </div>
 
-                    {/* DATAS: FECHAMENTO, VENCIMENTO E MELHOR DIA */}
                     <div className="grid grid-cols-3 gap-2 bg-slate-950/70 p-3 rounded-xl border border-slate-800/70 text-center">
                       <div>
                         <span className="block text-[10px] text-slate-400 uppercase">Fechamento</span>
@@ -1362,10 +1844,9 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* VALORES E BARRA DE LIMITE */}
                     <div className="space-y-2">
                       <div className="flex justify-between text-xs">
-                        <span className="text-slate-400">Fatura de {filtroMesAno}: <strong className="text-rose-400">R$ {c.faturaMes.toFixed(2)}</strong></span>
+                        <span className="text-slate-400">Fatura ({filtroMesAno}): <strong className="text-rose-400">R$ {c.faturaMes.toFixed(2)}</strong></span>
                         <span className="text-slate-400">Disponível: <strong className="text-emerald-400">R$ {c.disponivel.toFixed(2)}</strong></span>
                       </div>
                       <div className="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
@@ -1376,21 +1857,21 @@ export default function App() {
                       </div>
                       <div className="flex justify-between text-[11px] text-slate-400">
                         <span>Total preso (c/ parcelas): R$ {c.comprometidoTotal.toFixed(2)} ({c.pctUso}%)</span>
-                        <span>Limite Total: R$ {Number(c.limite).toFixed(2)}</span>
+                        <span>Limite: R$ {Number(c.limite).toFixed(2)}</span>
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
 
-              {/* LANÇAR COMPRA PARCELADA DIRETO NA ABA DE CARTÃO */}
+              {/* LANÇAR COMPRA PARCELADA */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-                  <Plus className="w-4 h-4 text-emerald-400" /> Novo Lançamento / Compra Parcelada no Cartão
+                  <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra no Cartão (À Vista ou Parcelada)
                 </h3>
                 <form onSubmit={lancarCompraCartaoManual} className="grid grid-cols-1 sm:grid-cols-5 gap-3">
                   <input 
-                    type="text" required placeholder="Descrição (ex: Geladeira)" value={novaCompraCartao.descricao}
+                    type="text" required placeholder="Descrição (ex: Micro-ondas)" value={novaCompraCartao.descricao}
                     onChange={e => setNovaCompraCartao({ ...novaCompraCartao, descricao: e.target.value })}
                     className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   />
@@ -1428,7 +1909,7 @@ export default function App() {
                 </form>
               </div>
 
-              {/* FATURA DETALHADA POR CARTÃO COM OPÇÃO DE EDITAR COMPRAS */}
+              {/* FATURA DETALHADA */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                   <h3 className="text-sm font-bold text-slate-200">
@@ -1461,16 +1942,18 @@ export default function App() {
                           <p className="text-sm font-medium text-slate-200 flex items-center gap-2">
                             {t.descricao}
                             <span className="text-[10px] bg-slate-800 text-emerald-400 px-2 py-0.5 rounded-md font-bold">{t.cartao_nome}</span>
-                            {t.fatura_paga && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full">Paga / Antecipada</span>}
+                            {t.fatura_paga && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full">Fatura Quitada</span>}
                           </p>
                           <p className="text-xs text-slate-400">{t.categoria}</p>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="font-bold text-sm text-rose-400">R$ {Number(t.valor).toFixed(2)}</span>
-                          <button onClick={() => setTransacaoEditando(t)} className="text-slate-400 hover:text-sky-400 p-1" title="Editar compra">
+                          <span className={`font-bold text-sm ${Number(t.valor) < 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            R$ {Number(t.valor).toFixed(2)}
+                          </span>
+                          <button onClick={() => setTransacaoEditando(t)} className="text-slate-400 hover:text-sky-400 p-1">
                             <Edit3 className="w-4 h-4" />
                           </button>
-                          <button onClick={() => excluirTransacao(t.id)} className="text-slate-500 hover:text-rose-400 p-1" title="Excluir compra">
+                          <button onClick={() => excluirTransacao(t.id)} className="text-slate-500 hover:text-rose-400 p-1">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
@@ -1482,7 +1965,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 3: CADASTRO DE BANCOS E CARTÕES (COM EDIÇÃO)
+              ABA 6: CADASTRO DE BANCOS E CARTÕES (COM EDIÇÃO E SALDO INICIAL)
           ================================================================ */}
           {abaAtiva === 'bancos' && (
             <div className="space-y-6">
@@ -1493,13 +1976,13 @@ export default function App() {
                     <CreditCard className="w-5 h-5 text-emerald-400" /> {cartaoForm.id ? 'Editar Cartão de Crédito' : 'Cadastrar Cartão de Crédito'}
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Configure múltiplos cartões, limites, dia de fechamento (melhor dia de compra) e vencimento.
+                    Configure múltiplos cartões, limites, dia de fechamento e dia de vencimento.
                   </p>
                 </div>
 
                 <form onSubmit={salvarCartao} className="grid grid-cols-1 sm:grid-cols-5 gap-3">
                   <input 
-                    type="text" required placeholder="Nome (ex: VISA INFINITE)" value={cartaoForm.nome}
+                    type="text" required placeholder="Nome (ex: VISA)" value={cartaoForm.nome}
                     onChange={e => setCartaoForm({ ...cartaoForm, nome: e.target.value })}
                     className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
                   />
@@ -1512,13 +1995,11 @@ export default function App() {
                     type="number" min="1" max="31" required placeholder="Dia Fechamento" value={cartaoForm.diaFechamento}
                     onChange={e => setCartaoForm({ ...cartaoForm, diaFechamento: e.target.value })}
                     className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
-                    title="Dia de Fechamento da Fatura"
                   />
                   <input 
                     type="number" min="1" max="31" required placeholder="Dia Vencimento" value={cartaoForm.diaVencimento}
                     onChange={e => setCartaoForm({ ...cartaoForm, diaVencimento: e.target.value })}
                     className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
-                    title="Dia de Vencimento da Fatura"
                   />
                   <input 
                     type="text" placeholder="Banco Emissor (ex: Itaú, C6)" value={cartaoForm.banco}
@@ -1563,20 +2044,20 @@ export default function App() {
                 </div>
               </div>
 
-              {/* CADASTRO / EDIÇÃO DE BANCOS & CARTÕES DE DÉBITO */}
+              {/* CADASTRO / EDIÇÃO DE BANCOS & SALDO INICIAL */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-5 shadow-xl">
                 <div>
                   <h2 className="text-lg font-bold flex items-center gap-2">
-                    <Landmark className="w-5 h-5 text-sky-400" /> {bancoForm.id ? 'Editar Conta Bancária / Débito' : 'Cadastrar Bancos & Cartões de Débito'}
+                    <Landmark className="w-5 h-5 text-sky-400" /> {bancoForm.id ? 'Editar Conta Bancária' : 'Cadastrar Bancos & Contas'}
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Cadastre suas contas bancárias para movimentações no Débito, Pix e Transferências.
+                    Defina o nome da conta e o saldo inicial para acompanhar na aba "Saldos das Contas".
                   </p>
                 </div>
 
-                <form onSubmit={salvarBanco} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <form onSubmit={salvarBanco} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   <input 
-                    type="text" required placeholder="Nome do Banco (ex: Itaú, Bradesco, C6)" value={bancoForm.nome}
+                    type="text" required placeholder="Nome (ex: Itaú, Nubank)" value={bancoForm.nome}
                     onChange={e => setBancoForm({ ...bancoForm, nome: e.target.value })}
                     className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
                   />
@@ -1585,14 +2066,19 @@ export default function App() {
                     onChange={e => setBancoForm({ ...bancoForm, tipo: e.target.value })}
                     className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
                   >
-                    <option value="Conta Corrente / Débito">Conta Corrente / Cartão de Débito</option>
+                    <option value="Conta Corrente / Débito">Conta Corrente / Débito</option>
                     <option value="Conta Digital / Pix">Conta Digital / Pix</option>
                     <option value="Conta PJ / Empresarial">Conta PJ / Empresarial</option>
                     <option value="Carteira / Dinheiro">Carteira Física / Dinheiro</option>
                   </select>
+                  <input 
+                    type="number" step="0.01" placeholder="Saldo Inicial (R$)" value={bancoForm.saldoInicial}
+                    onChange={e => setBancoForm({ ...bancoForm, saldoInicial: e.target.value })}
+                    className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
+                  />
                   <div className="flex gap-2">
                     <button type="submit" className="flex-1 bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
-                      {bancoForm.id ? 'Salvar Banco' : '+ Adicionar Banco'}
+                      {bancoForm.id ? 'Salvar' : '+ Adicionar'}
                     </button>
                     {bancoForm.id && (
                       <button 
@@ -1600,7 +2086,7 @@ export default function App() {
                         onClick={() => setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' })}
                         className="px-3 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-xs"
                       >
-                        Cancelar
+                        X
                       </button>
                     )}
                   </div>
@@ -1611,7 +2097,7 @@ export default function App() {
                     <div key={b.id} className="flex items-center justify-between bg-slate-950/70 border border-slate-800 px-4 py-3.5 rounded-xl">
                       <div>
                         <p className="font-bold text-sm text-slate-100">{b.nome}</p>
-                        <p className="text-xs text-slate-400">{b.tipo}</p>
+                        <p className="text-xs text-slate-400">{b.tipo} • Saldo Inicial: <strong>R$ {Number(b.saldoInicial || 0).toFixed(2)}</strong></p>
                       </div>
                       <div className="flex items-center gap-2">
                         <button onClick={() => editarBanco(b)} className="text-xs bg-slate-800 hover:bg-slate-700 text-sky-400 px-3 py-1.5 rounded-lg flex items-center gap-1">
@@ -1629,50 +2115,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 4: CONTAS FIXAS & ALERTAS NO WHATSAPP
-          ================================================================ */}
-          {abaAtiva === 'fixas' && (
-            <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-6 shadow-xl">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                <div>
-                  <h2 className="text-lg font-bold flex items-center gap-2">
-                    <BellRing className="w-5 h-5 text-amber-400" /> Contas Fixas & Alertas no WhatsApp
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    No dia do vencimento de cada conta abaixo, o bot envia um lembrete automático no seu WhatsApp!
-                  </p>
-                </div>
-                <button 
-                  onClick={dispararTesteAlertaWhatsApp}
-                  className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 px-4 py-2 rounded-xl text-xs font-semibold transition"
-                >
-                  🔔 Testar Alerta de Hoje no WhatsApp
-                </button>
-              </div>
-
-              <form onSubmit={adicionarContaFixa} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                <input type="text" placeholder="Nome (ex: Energia Elétrica)" value={fixaNome} onChange={e => setFixaNome(e.target.value)} className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
-                <input type="number" placeholder="Valor (R$)" value={fixaValor} onChange={e => setFixaValor(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
-                <input type="number" min="1" max="31" placeholder="Dia Venc. (ex: 15)" value={fixaDia} onChange={e => setFixaDia(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
-                <button type="submit" className="sm:col-span-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 py-3 rounded-xl font-semibold text-sm transition">+ Cadastrar Conta com Alerta no WhatsApp</button>
-              </form>
-
-              <div className="space-y-2.5">
-                {contasFixas.map(cf => (
-                  <div key={cf.id} className="flex items-center justify-between bg-slate-950/60 border border-slate-800 px-4 py-3.5 rounded-xl">
-                    <div>
-                      <p className="font-medium text-sm text-slate-200">{cf.nome}</p>
-                      <p className="text-xs text-slate-400"> Alerta WhatsApp todo dia <strong>{cf.diaVencimento}</strong> • R$ {Number(cf.valorPadrao).toFixed(2)}</p>
-                    </div>
-                    <button onClick={() => excluirContaFixa(cf.id)} className="text-slate-500 hover:text-rose-400"><Trash2 className="w-4 h-4" /></button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* ================================================================
-              ABA 5: CATEGORIAS & LIMITES
+              ABA 7: CATEGORIAS & LIMITES
           ================================================================ */}
           {abaAtiva === 'categorias' && (
             <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-6 shadow-xl">
@@ -1721,7 +2164,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 6: CONEXÃO WHATSAPP
+              ABA 8: CONEXÃO WHATSAPP
           ================================================================ */}
           {abaAtiva === 'whatsapp' && (
             <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-8 rounded-2xl text-center space-y-6 shadow-xl max-w-lg mx-auto">
@@ -1775,7 +2218,7 @@ export default function App() {
             </div>
             <div>
               <h3 className="font-bold text-sm text-emerald-300">Simulador do WhatsApp</h3>
-              <p className="text-xs text-emerald-500/80 font-medium">Testar Perguntas & Gastos sem Método</p>
+              <p className="text-xs text-emerald-500/80 font-medium">Vencimentos & Consultas Rápidas</p>
             </div>
           </div>
 
@@ -1795,14 +2238,14 @@ export default function App() {
           </div>
 
           <div className="p-2.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2 overflow-x-auto">
-            <button type="button" onClick={() => setMsgWhats('Comprei um lanche de 45,00')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">❓ Testar Sem Pagamento</button>
-            <button type="button" onClick={() => setMsgWhats('Fatura do VISA')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">💳 "Fatura VISA"</button>
-            <button type="button" onClick={() => setMsgWhats('desfazer')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-rose-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">🗑️ "desfazer"</button>
+            <button type="button" onClick={() => setMsgWhats('Água vence 25/10 valor 85,00')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">📅 Agendar Água 25/10</button>
+            <button type="button" onClick={() => setMsgWhats('contas a vencer')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">📋 "contas a vencer"</button>
+            <button type="button" onClick={() => setMsgWhats('contas proximas do vencimento')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">⏳ "próximas 5 dias"</button>
           </div>
 
           <form onSubmit={handleEnviarWhatsApp} className="p-3.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2.5">
             <input 
-              type="text" placeholder="Digite como no WhatsApp..." value={msgWhats} onChange={e => setMsgWhats(e.target.value)} 
+              type="text" placeholder="Ex: Água vence 25/10 valor 80,00..." value={msgWhats} onChange={e => setMsgWhats(e.target.value)} 
               className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-200 focus:outline-none focus:border-emerald-500" 
             />
             <button type="submit" className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 p-3 rounded-xl transition flex items-center justify-center">

@@ -23,17 +23,22 @@ app.use(cors());
 app.use(express.json());
 
 const sessions = new Map();
-const userJids = new Map(); // Guarda o JID do usuário para envio de alertas ativos
+const userJids = new Map();
 
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
 
-// Rota principal leve (evita erro "output too large" no cron-job.org e verifica alertas do dia)
+const formatarDataBR = (isoDate) => {
+  if (!isoDate || !isoDate.includes('-')) return isoDate || '';
+  const [a, m, d] = isoDate.split('-');
+  return `${d}/${m}/${a}`;
+};
+
+// Rota principal leve para o cron-job.org e verificação de alertas diários
 app.get('/', (req, res) => {
   verificarAlertasVencimento().catch(() => {});
   res.status(200).send('OK');
 });
 
-// Rota manual para forçar disparo de alertas de vencimento
 app.get('/verificar-alertas', async (req, res) => {
   await verificarAlertasVencimento();
   res.status(200).send('Alertas verificados');
@@ -225,7 +230,7 @@ async function startWhatsAppForUser(userId) {
       const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
       if (!texto) return;
 
-      // Filtro anti-loop para ignorar as respostas enviadas pelo próprio robô
+      // Ignora respostas automáticas do próprio robô
       if (
         texto.startsWith('✅') || 
         texto.startsWith('📊') || 
@@ -237,7 +242,9 @@ async function startWhatsAppForUser(userId) {
         texto.startsWith('🗑️') ||
         texto.startsWith('❓') ||
         texto.startsWith('🔔') ||
-        texto.startsWith('🚨')
+        texto.startsWith('🚨') ||
+        texto.startsWith('📅') ||
+        texto.startsWith('⏳')
       ) return;
 
       userJids.set(userId, msg.key.remoteJid);
@@ -250,19 +257,17 @@ async function startWhatsAppForUser(userId) {
 }
 
 // ============================================================================
-// 4. DISPARO DE ALERTAS DE VENCIMENTO DE CONTAS FIXAS E FATURAS NO WHATSAPP
+// 4. DISPARO DE ALERTAS DE VENCIMENTO DE CONTAS AGENDADAS E FATURAS NO WHATSAPP
 // ============================================================================
 async function verificarAlertasVencimento() {
   try {
     const agora = new Date();
-    // Ajusta fuso horário para Brasília (UTC-3)
     const brTime = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
     const diaHoje = brTime.getUTCDate();
     const horaAtual = brTime.getUTCHours();
     const dataHojeStr = brTime.toISOString().split('T')[0];
     const anoMesAtual = dataHojeStr.slice(0, 7);
 
-    // Envia alertas apenas a partir das 8h da manhã
     if (horaAtual < 8) return;
 
     const usersSnap = await db.collection('users')
@@ -273,16 +278,13 @@ async function verificarAlertasVencimento() {
       const userId = userDoc.id;
       const userData = userDoc.data();
 
-      // Garante que só envia o alerta 1 vez por dia
       if (userData.ultimo_alerta_data === dataHojeStr) continue;
 
       const sock = sessions.get(userId);
       const remoteJid = userJids.get(userId) || userData.whatsapp_jid;
       if (!sock || !remoteJid) continue;
 
-      const contasFixas = userData.contasFixas || [];
       const cartoes = userData.cartoes || [];
-
       const snapTrans = await db.collection('users').doc(userId).collection('transacoes')
         .where('anoMes', '==', anoMesAtual)
         .get();
@@ -290,19 +292,15 @@ async function verificarAlertasVencimento() {
 
       let avisos = [];
 
-      // 1. Verifica Contas Fixas que vencem hoje e ainda não foram pagas
-      for (const cf of contasFixas) {
-        if (Number(cf.diaVencimento) === diaHoje) {
-          const jaPaga = transMes.some(
-            t => t.conta_fixa_id === cf.id || semAcento(t.descricao).includes(semAcento(cf.nome))
-          );
-          if (!jaPaga) {
-            avisos.push(`• *${cf.nome}* — R$ ${Number(cf.valorPadrao || 0).toFixed(2)}`);
-          }
-        }
+      // 1. Contas agendadas (a vencer) que vencem exatamente hoje e estão em aberto
+      const contasVencendoHoje = transMes.filter(
+        t => t.pago === false && t.data_vencimento === dataHojeStr
+      );
+      for (const c of contasVencendoHoje) {
+        avisos.push(`• *${c.descricao}* (${c.tipo === 'RECEITA' ? 'A Receber' : 'A Pagar'}) — R$ ${Number(c.valor || 0).toFixed(2)}`);
       }
 
-      // 2. Verifica Faturas de Cartão que vencem hoje
+      // 2. Faturas de Cartão que vencem hoje
       for (const c of cartoes) {
         if (Number(c.diaVencimento) === diaHoje) {
           const faturaMes = transMes
@@ -316,10 +314,10 @@ async function verificarAlertasVencimento() {
 
       if (avisos.length > 0) {
         await sock.sendMessage(remoteJid, {
-          text: `🔔 *Lembrete de Vencimento Hoje (Dia ${diaHoje})*\n\n` +
-                `As seguintes contas vencem hoje e ainda constam em aberto:\n` +
+          text: `🔔 *Lembrete de Vencimento Hoje (${formatarDataBR(dataHojeStr)})*\n\n` +
+                `Os seguintes compromissos vencem hoje e constam em aberto:\n` +
                 `${avisos.join('\n')}\n\n` +
-                `💡 _Você pode dar baixa nelas pelo painel ou responder confirmando o pagamento._`
+                `💡 _Acesse a aba "A Vencer & Receber" ou "Cartões" no painel para dar baixa._`
         });
       }
 
@@ -330,45 +328,101 @@ async function verificarAlertasVencimento() {
   }
 }
 
-// Verifica a cada 30 minutos
 setInterval(verificarAlertasVencimento, 30 * 60 * 1000);
 
 // ============================================================================
-// 5. FUNÇÃO AUXILIAR PARA SALVAR ITENS E DISPARAR ALERTA DE LIMITE DE CARTÃO
+// 5. FUNÇÃO AUXILIAR PARA EXTRAIR DATA DE VENCIMENTO (Ex: "vence 25/10", "dia 25")
 // ============================================================================
-async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesAtual, textoOriginal) {
+function extrairDataVencimento(texto) {
   const hoje = new Date();
+  const anoAtual = hoje.getFullYear();
+  const mesAtual = hoje.getMonth() + 1;
+
+  // Padrão DD/MM/YYYY ou DD/MM ou DD-MM
+  const matchData = texto.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
+  if (matchData) {
+    const dia = String(matchData[1]).padStart(2, '0');
+    const mes = String(matchData[2]).padStart(2, '0');
+    let ano = matchData[3] ? String(matchData[3]) : String(anoAtual);
+    if (ano.length === 2) ano = `20${ano}`;
+    return {
+      dataVencimento: `${ano}-${mes}-${dia}`,
+      anoMes: `${ano}-${mes}`,
+      trechoRemovido: matchData[0]
+    };
+  }
+
+  // Padrão "vence dia 25" ou "vencimento 25"
+  const matchDia = texto.match(/(?:vence|vencimento|dia)\s+(\d{1,2})\b/i);
+  if (matchDia) {
+    const dia = String(matchDia[1]).padStart(2, '0');
+    const mes = String(mesAtual).padStart(2, '0');
+    return {
+      dataVencimento: `${anoAtual}-${mes}-${dia}`,
+      anoMes: `${anoAtual}-${mes}`,
+      trechoRemovido: matchDia[0]
+    };
+  }
+
+  return null;
+}
+
+// ============================================================================
+// 6. GRAVAÇÃO NO FIRESTORE (COM SUPORTE A CONTAS A VENCER E ALERTAS DE LIMITE)
+// ============================================================================
+async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadrao, textoOriginal) {
+  const hoje = new Date();
+  const hojeStr = hoje.toISOString().split('T')[0];
   let respostas = [];
 
-  // Carrega todas as transações para calcular limite total comprometido do cartão e orçamento do mês
   const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
   const todasTransacoes = snapAll.docs.map(d => d.data());
 
   for (const item of itens) {
     const parcelasTotal = item.parcelasTotal || 1;
     const valorParcela = item.valorParcela;
+    const isAgendado = item.pago === false;
 
     for (let i = 0; i < parcelasTotal; i++) {
-      const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
-      const anoM = dataParcela.getFullYear();
-      const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+      let anoMesItem = item.anoMes || anoMesPadrao;
+      let dataVencItem = item.data_vencimento || hojeStr;
+
+      if (parcelasTotal > 1) {
+        const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
+        const anoM = dataParcela.getFullYear();
+        const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+        anoMesItem = `${anoM}-${mesM}`;
+        dataVencItem = `${anoM}-${mesM}-15`;
+      }
 
       await db.collection('users').doc(userId).collection('transacoes').add({
         descricao: parcelasTotal > 1 ? `${item.descricao} (${i + 1}/${parcelasTotal})` : item.descricao,
         valor: valorParcela,
         tipo: item.tipo,
-        metodo: item.metodo,
+        metodo: item.metodo || 'A DEFINIR',
         cartao_nome: item.cartao_nome || null,
         banco_nome: item.banco_nome || null,
         categoria: item.categoria,
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
         fatura_paga: false,
-        anoMes: `${anoM}-${mesM}`,
+        pago: item.pago !== undefined ? item.pago : true,
+        data_vencimento: dataVencItem,
+        anoMes: anoMesItem,
         origem: 'WHATSAPP_IA',
         mensagem_original: textoOriginal,
         criadoEm: admin.firestore.FieldValue.serverTimestamp()
       });
+    }
+
+    if (isAgendado) {
+      respostas.push(
+        `📅 *Conta Agendada (${item.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n` +
+        `• *${item.descricao}* [${item.categoria}]\n` +
+        `• Valor: *R$ ${valorParcela.toFixed(2)}*\n` +
+        `• Vencimento: *${formatarDataBR(item.data_vencimento)}* (Status: Em aberto)`
+      );
+      continue;
     }
 
     let alertasExtras = '';
@@ -377,7 +431,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesAtua
     const limiteCat = Number(orcamentos[item.categoria] || 0);
     if (limiteCat > 0 && item.tipo === 'DESPESA') {
       const gastoCatMes = todasTransacoes
-        .filter(t => t.anoMes === anoMesAtual && t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(item.categoria))
+        .filter(t => t.anoMes === anoMesPadrao && t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(item.categoria))
         .reduce((a, b) => a + Number(b.valor || 0), 0) + valorParcela;
       const pctCat = Math.round((gastoCatMes / limiteCat) * 100);
       if (pctCat >= 100) {
@@ -387,12 +441,12 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesAtua
       }
     }
 
-    // 2. Alerta de Limite do Cartão de Crédito (deduzindo compras e parcelas ativas)
+    // 2. Alerta de Limite do Cartão de Crédito
     if (item.metodo === 'CREDITO' && item.cartao_nome) {
       const objCartao = cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome));
       if (objCartao && Number(objCartao.limite) > 0) {
         const gastoAcumuladoCartao = todasTransacoes
-          .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(objCartao.nome) && !t.fatura_paga && t.anoMes >= anoMesAtual)
+          .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(objCartao.nome) && !t.fatura_paga && t.anoMes >= anoMesPadrao)
           .reduce((a, b) => a + Number(b.valor || 0), 0) + (valorParcela * parcelasTotal);
 
         const limiteTotal = Number(objCartao.limite);
@@ -419,7 +473,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesAtua
 }
 
 // ============================================================================
-// 6. MOTOR DE INTELIGÊNCIA FINANCEIRA (PENDÊNCIAS, DESFAZER, CONSULTAS E GASTOS)
+// 7. MOTOR DE INTELIGÊNCIA FINANCEIRA (COMANDOS DE VENCIMENTO, SALDOS E GASTOS)
 // ============================================================================
 async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
   try {
@@ -431,8 +485,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17 }
     ];
     const bancos = userData.bancos || [
-      { id: 'b1', nome: 'Itaú', tipo: 'Corrente / Débito' },
-      { id: 'b2', nome: 'Nubank Conta', tipo: 'Digital / Pix' }
+      { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 0 },
+      { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 0 }
     ];
     const categorias = userData.categorias || ['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros'];
     const orcamentos = userData.orcamentos || {};
@@ -441,6 +495,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const txtLimpo = semAcento(textoUsuario).trim();
     const hoje = new Date();
     const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
+    const hojeStr = hoje.toISOString().split('T')[0];
 
     // ------------------------------------------------------------------------
     // MODO -1: RESPOSTA A UM LANÇAMENTO PENDENTE DE FORMA DE PAGAMENTO
@@ -483,12 +538,12 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           bancoEscolhido = bancos[0]?.nome || null;
         } else if (/pix/i.test(txtLimpo)) {
           metodoEscolhido = 'PIX';
+          bancoEscolhido = bancos[0]?.nome || null;
         } else if (/dinheiro|especie/i.test(txtLimpo)) {
           metodoEscolhido = 'DINHEIRO';
         }
       }
 
-      // Se o usuário respondeu com uma forma de pagamento válida, conclui o lançamento!
       if (metodoEscolhido) {
         const matchParcelasResp = txtLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
         const parcelasResp = matchParcelasResp ? parseInt(matchParcelasResp[1]) : null;
@@ -502,7 +557,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             valorParcela: vParc,
             metodo: metodoEscolhido,
             cartao_nome: cartaoEscolhido,
-            banco_nome: bancoEscolhido
+            banco_nome: bancoEscolhido,
+            pago: true
           };
         });
 
@@ -511,7 +567,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         await sock.sendMessage(remoteJid, { text: respostas.join('\n\n') });
         return;
       }
-      // Se a nova mensagem já contiver novos números/gastos, apaga a pendência antiga e segue o fluxo normal
       await userRef.set({ pendente_pagamento: null }, { merge: true });
     }
 
@@ -569,9 +624,77 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MODO 1: CONSULTOR FINANCEIRO (Limites, Cartões, Melhor Dia de Compra e Saldo)
+    // MODO 0.5: COMANDOS DE CONTAS PRÓXIMAS DO VENCIMENTO (ATÉ 5 DIAS) E CONTAS A VENCER DO MÊS
     // ------------------------------------------------------------------------
-    const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite|disponivel|melhor dia|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi/i.test(txtLimpo);
+    const isProximasVencimento = /proxima|proximo|proximos|vencendo|5 dias/i.test(txtLimpo) && /conta|vencimento|vencer/i.test(txtLimpo);
+    const isContasAVencerMes = /contas a vencer|contas em aberto|o que vence|contas pendentes|a pagar/i.test(txtLimpo);
+
+    if (isProximasVencimento || isContasAVencerMes) {
+      const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
+      const todasTrans = snapAll.docs.map(d => d.data());
+
+      if (isProximasVencimento) {
+        const hojeZero = new Date(hojeStr + 'T00:00:00');
+        const limite5Dias = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
+
+        const listaProximas = todasTrans.filter(t => {
+          if (t.pago !== false || !t.data_vencimento) return false;
+          const dtVenc = new Date(t.data_vencimento + 'T00:00:00');
+          return dtVenc >= hojeZero && dtVenc <= limite5Dias;
+        }).sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
+
+        if (listaProximas.length === 0) {
+          await sock.sendMessage(remoteJid, {
+            text: `⏳ *Contas Próximas do Vencimento (Até 5 dias)*\n\n🎉 Nenhuma conta em aberto vencendo nos próximos 5 dias!`
+          });
+          return;
+        }
+
+        const totalProx = listaProximas.reduce((acc, t) => acc + Number(t.valor || 0), 0);
+        const linhas = listaProximas.map(t => {
+          const dtVenc = new Date(t.data_vencimento + 'T00:00:00');
+          const diffDias = Math.round((dtVenc - hojeZero) / (1000 * 60 * 60 * 24));
+          const tagDia = diffDias === 0 ? '⚠️ *Vence HOJE*' : `faltam ${diffDias} dia(s)`;
+          return `• *${t.descricao}* [${t.categoria}]\n   💰 R$ ${Number(t.valor).toFixed(2)} — Vence: *${formatarDataBR(t.data_vencimento)}* (${tagDia})`;
+        }).join('\n\n');
+
+        await sock.sendMessage(remoteJid, {
+          text: `⏳ *Contas Próximas do Vencimento (Até 5 dias)*\n\n${linhas}\n\n📌 *Total nos próximos 5 dias:* R$ ${totalProx.toFixed(2)}`
+        });
+        return;
+      }
+
+      if (isContasAVencerMes) {
+        const abertasMes = todasTrans
+          .filter(t => t.anoMes === anoMesAtual && t.pago === false)
+          .sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
+
+        if (abertasMes.length === 0) {
+          await sock.sendMessage(remoteJid, {
+            text: `📅 *Contas em Aberto (${anoMesAtual})*\n\n✅ Você não tem nenhuma conta em aberto neste mês!`
+          });
+          return;
+        }
+
+        const totalPagar = abertasMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
+        const totalReceber = abertasMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
+
+        const linhas = abertasMes.map(t => {
+          const icone = t.tipo === 'RECEITA' ? '🟢 [A Receber]' : '🔴 [A Pagar]';
+          return `${icone} *${t.descricao}* — R$ ${Number(t.valor).toFixed(2)}\n   📅 Vencimento: *${formatarDataBR(t.data_vencimento)}*`;
+        }).join('\n\n');
+
+        await sock.sendMessage(remoteJid, {
+          text: `📅 *Contas em Aberto do Mês (${anoMesAtual})*\n\n${linhas}\n\n🔴 *Total a Pagar:* R$ ${totalPagar.toFixed(2)}\n🟢 *Total a Receber:* R$ ${totalReceber.toFixed(2)}`
+        });
+        return;
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // MODO 1: CONSULTOR FINANCEIRO (Limites, Cartões, Melhor Dia e Saldo)
+    // ------------------------------------------------------------------------
+    const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite|disponivel|melhor dia|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLimpo);
     
     if (isPergunta) {
       const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
@@ -648,18 +771,18 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // D) Resumo Geral
-      const rec = transMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
-      const desp = transMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
+      // D) Resumo Geral e Saldos por Conta
+      const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false).reduce((a, b) => a + Number(b.valor || 0), 0);
+      const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO').reduce((a, b) => a + Number(b.valor || 0), 0);
 
       await sock.sendMessage(remoteJid, {
-        text: `📊 *Resumo FinZap (${anoMesAtual})*\n\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Saldo Atual: R$ ${(rec - desp).toFixed(2)}*`
+        text: `📊 *Resumo FinZap (${anoMesAtual})*\n\n🟢 Entradas Recebidas: R$ ${rec.toFixed(2)}\n🔴 Saídas Pagas (Pix/Débito): R$ ${desp.toFixed(2)}\n💰 *Saldo Líquido: R$ ${(rec - desp).toFixed(2)}*`
       });
       return;
     }
 
     // ------------------------------------------------------------------------
-    // MODO 2: LANÇAMENTOS (Com verificação se informou a forma de pagamento)
+    // MODO 2: LANÇAMENTOS (Gastos imediatos, Parcelados ou Contas com Vencimento Futuro)
     // ------------------------------------------------------------------------
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
@@ -670,10 +793,17 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     for (const parte of partes) {
       const pLimpo = semAcento(parte);
 
-      const matchParcelas = pLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+      // 1. Verifica se possui data de vencimento / agendamento (ex: "Agua vence 25/10 valor 10.00")
+      const infoVencimento = extrairDataVencimento(parte);
+      const isAgendado = Boolean(infoVencimento) || /vence|vencimento|a pagar|a receber|boleto para/i.test(pLimpo);
+
+      const parteSemData = infoVencimento ? parte.replace(infoVencimento.trechoRemovido, ' ') : parte;
+      const pLimpoSemData = semAcento(parteSemData);
+
+      const matchParcelas = pLimpoSemData.match(/(\d+)\s*(?:x|vezes|parcelas)/);
       const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
 
-      const textoSemParcela = matchParcelas ? parte.replace(new RegExp(matchParcelas[0], 'i'), '') : parte;
+      const textoSemParcela = matchParcelas ? parteSemData.replace(new RegExp(matchParcelas[0], 'i'), '') : parteSemData;
       const matchValor = textoSemParcela.match(/(\d+\.\d{2}|\d+)/);
       if (!matchValor) continue;
 
@@ -681,7 +811,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       if (isNaN(valorTotal) || valorTotal <= 0) continue;
 
       const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
-      const isReceita = /recebi|ganhei|salario|venda/i.test(pLimpo);
+      const isReceita = /recebi|ganhei|salario|venda|a receber|receber/i.test(pLimpo);
       const tipo = isReceita ? 'RECEITA' : 'DESPESA';
 
       let metodo = null;
@@ -712,12 +842,17 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           cartaoNome = cartoes[0]?.nome || 'CREDITO';
         } else if (/debito/i.test(pLimpo)) {
           metodo = 'DEBITO';
+          bancoNome = bancos[0]?.nome || null;
         } else if (/pix/i.test(pLimpo)) {
           metodo = 'PIX';
-        } else if (/dinheiro|especie|boleto/i.test(pLimpo)) {
+          bancoNome = bancos[0]?.nome || null;
+        } else if (/dinheiro|especie/i.test(pLimpo)) {
           metodo = 'DINHEIRO';
+        } else if (isAgendado) {
+          metodo = 'BOLETO / AGENDADO';
         } else if (isReceita) {
           metodo = 'PIX';
+          bancoNome = bancos[0]?.nome || null;
         }
       }
 
@@ -726,7 +861,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       else if (/lanche|restaurante|ifood|padaria|almoco|jantar|burger|pizza|cafe/i.test(pLimpo)) categoria = 'Alimentação';
       else if (/uber|gasolina|combustivel|posto|estacionamento|pedagio/i.test(pLimpo)) categoria = 'Transporte';
       else if (/cinema|passeio|bar|viagem|lazer|shopping|netflix|streaming/i.test(pLimpo)) categoria = 'Lazer';
-      else if (/luz|agua|internet|energia|boleto|aluguel|condominio/i.test(pLimpo)) categoria = 'Contas';
+      else if (/luz|agua|internet|energia|boleto|aluguel|condominio|vence|vencimento/i.test(pLimpo)) categoria = 'Contas';
 
       for (const cat of categorias) {
         if (pLimpo.includes(semAcento(cat))) {
@@ -736,7 +871,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
 
       let descricao = textoSemParcela
-        .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|no cartao de credito|no cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |do |da |no |na |em /gi, ' ')
+        .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|a pagar|a receber|dia|no cartao de credito|no cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |do |da |no |na |em /gi, ' ')
         .replace(matchValor[0], '')
         .replace(cartaoNome ? new RegExp(cartaoNome, 'gi') : '', '')
         .replace(bancoNome ? new RegExp(bancoNome, 'gi') : '', '')
@@ -755,10 +890,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         metodo,
         cartao_nome: cartaoNome,
         banco_nome: bancoNome,
-        categoria
+        categoria,
+        pago: !isAgendado,
+        data_vencimento: infoVencimento ? infoVencimento.dataVencimento : hojeStr,
+        anoMes: infoVencimento ? infoVencimento.anoMes : anoMesAtual
       };
 
-      if (metodo) {
+      if (metodo || isAgendado) {
         itensComMetodo.push(objItem);
       } else {
         itensSemMetodo.push(objItem);
@@ -767,13 +905,11 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
     let mensagensSaida = [];
 
-    // Grava imediatamente os itens que já tinham forma de pagamento
     if (itensComMetodo.length > 0) {
       const respGravados = await gravarItensNoBanco(userId, itensComMetodo, cartoes, orcamentos, anoMesAtual, textoUsuario);
       mensagensSaida.push(...respGravados);
     }
 
-    // Se houver itens sem forma de pagamento, guarda no Firestore e pergunta ao usuário!
     if (itensSemMetodo.length > 0) {
       await userRef.set({
         pendente_pagamento: {
@@ -805,7 +941,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 }
 
 // ============================================================================
-// 7. AUTO-RECONEXÃO QUANDO O SERVIDOR REINICIA
+// 8. AUTO-RECONEXÃO QUANDO O SERVIDOR REINICIA
 // ============================================================================
 async function restaurarSessoesAtivas() {
   try {
