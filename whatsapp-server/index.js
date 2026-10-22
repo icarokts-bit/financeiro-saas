@@ -28,12 +28,9 @@ const sessions = new Map();
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
 
 // Rota principal (usada pelo cron-job.org para manter o servidor acordado 24h)
+// Rota principal leve (usada pelo cron-job.org para nunca hibernar)
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'online', 
-    service: 'FinZap WhatsApp Worker (Firestore Auth + IA)', 
-    activeSessions: sessions.size 
-  });
+  res.send('OK - FinZap Server Online');
 });
 
 // Rota para gerar novo QR Code
