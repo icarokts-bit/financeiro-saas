@@ -69,7 +69,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nVocê pode:\n1️⃣ Lançar múltiplos gastos: "Shopping, 50,00 de estacionamento no pix, 100,00 no cinema credito"\n2️⃣ Parcelar: "Comprei tênis 300 em 3x no Nubank"\n3️⃣ Perguntar: "Qual meu saldo?" ou "Fatura do VISA"' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nVocê pode:\n1️⃣ Lançar múltiplos gastos: "Shopping, 50,00 de estacionamento no pix, 100,00 no cinema credito"\n2️⃣ Parcelar: "Comprei tênis 300 em 3x no Nubank"\n3️⃣ Perguntar: "Qual meu saldo?" ou "Fatura do VISA"\n4️⃣ Apagar: "desfazer" ou "apagar ultimo"' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -280,7 +280,7 @@ export default function App() {
     });
   };
 
-  // 3. Simulador Inteligente no Painel (com suporte a decimais com vírgula e múltiplos itens)
+  // 3. Simulador Inteligente no Painel
   const interpretarItemUnico = (trecho) => {
     const txtLower = trecho.toLowerCase();
     const matchParcelas = txtLower.match(/(\d+)\s*(?:x|vezes|parcelas)/);
@@ -359,6 +359,23 @@ export default function App() {
     setProcessando(true);
 
     try {
+      // Comando Desfazer no Simulador
+      if (/^(apagar|excluir|deletar|desfazer)/i.test(txtLower.trim())) {
+        if (transacoes.length === 0) {
+          setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '⚠️ Nenhum lançamento para apagar.' }]);
+          setProcessando(false);
+          return;
+        }
+        const ultima = transacoes[0];
+        await deleteDoc(doc(db, 'users', user.uid, 'transacoes', ultima.id));
+        setHistoricoChat(prev => [...prev, { 
+          autor: 'bot', 
+          texto: `🗑️ *Removido:* ${ultima.descricao} (R$ ${Number(ultima.valor).toFixed(2)})` 
+        }]);
+        setProcessando(false);
+        return;
+      }
+
       const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|posso gastar/i.test(txtLower) && !/gastei|comprei|paguei|recebi/i.test(txtLower);
 
       if (isPergunta) {
@@ -396,7 +413,6 @@ export default function App() {
         return;
       }
 
-      // Converte números com vírgula (ex: 50,00 -> 50.00) antes de separar por vírgula
       const textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
       const partes = textoNormalizado
         .split(/(?:,|\s+e\s+|\s*;\s*|\n+)/i)
@@ -408,7 +424,7 @@ export default function App() {
       if (itensExtraidos.length === 0) {
         setHistoricoChat(prev => [...prev, { 
           autor: 'bot', 
-          texto: '🤔 Não identifiquei valores. Tente:\n• "Gastei 45 na padaria no PIX"\n• "Qual meu saldo?"' 
+          texto: '🤔 Não identifiquei valores. Tente:\n• "Gastei 45 na padaria no PIX"\n• "Qual meu saldo?"\n• "desfazer"' 
         }]);
         setProcessando(false);
         return;
@@ -463,8 +479,7 @@ export default function App() {
               .filter(t => t.anoMes === anoMesAtual && t.tipo === 'DESPESA' && t.categoria === dados.categoria)
               .reduce((a, b) => a + Number(b.valor || 0), 0) + dados.valorParcela;
             const pct = Math.round((gastoAcumulado / limiteCat) * 100);
-            if (pct >= 100) alertaOrc = `\n⚠️ *Alerta:* Você atingiu ${pct}% do limite de ${dados.categoria}!`;
-            else if (pct >= 80) alertaOrc = `\n👀 *Atenção:* ${pct}% do orçamento de ${dados.categoria} utilizado.`;
+            if (pct >= 100) alertaOrc = `\n⚠️ *Alerta:* Atingiu ${pct}% do limite de ${dados.categoria}!`;
           }
 
           resumoRespostas.push(`✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} (${dados.cartao_nome || dados.metodo})${alertaOrc}`);
@@ -1074,7 +1089,8 @@ export default function App() {
 
           <div className="p-2.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2 overflow-x-auto">
             <button type="button" onClick={() => setMsgWhats('Shopping, 50,00 de estacionamento no pix, 100,00 no cinema credito')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">⚡ Múltiplo</button>
-            <button type="button" onClick={() => setMsgWhats('Qual meu saldo?')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">📊 "Qual meu saldo?"</button>
+            <button type="button" onClick={() => setMsgWhats('Qual o limite de alimentação?')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">🎯 "Limite Alimentação"</button>
+            <button type="button" onClick={() => setMsgWhats('desfazer')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-rose-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">🗑️ "desfazer"</button>
           </div>
 
           <form onSubmit={handleEnviarWhatsApp} className="p-3.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2.5">

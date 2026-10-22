@@ -224,7 +224,7 @@ async function startWhatsAppForUser(userId) {
       const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
       if (!texto) return;
 
-      // Ignora mensagens enviadas pelo próprio robô para não dar loop infinito
+      // Filtro anti-loop de mensagens enviadas pelo próprio robô
       if (
         texto.startsWith('✅') || 
         texto.startsWith('📊') || 
@@ -232,7 +232,8 @@ async function startWhatsAppForUser(userId) {
         texto.startsWith('🤖') || 
         texto.startsWith('📂') || 
         texto.startsWith('🎯') ||
-        texto.startsWith('⚠️')
+        texto.startsWith('⚠️') ||
+        texto.startsWith('🗑️')
       ) return;
 
       await processarMensagemInteligente(userId, texto, sock, msg.key.remoteJid);
@@ -244,7 +245,7 @@ async function startWhatsAppForUser(userId) {
 }
 
 // ============================================================================
-// 4. MOTOR DE INTELIGÊNCIA FINANCEIRA (CONSULTAS E LANÇAMENTOS)
+// 4. MOTOR DE INTELIGÊNCIA FINANCEIRA (DESFAZER, CONSULTAS E LANÇAMENTOS)
 // ============================================================================
 async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
   try {
@@ -259,7 +260,60 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
 
     // ------------------------------------------------------------------------
-    // MODO 1: CONSULTOR FINANCEIRO (Responde perguntas sobre Limites, Cartões e Saldo)
+    // MODO 0: DESFAZER / APAGAR ÚLTIMO LANÇAMENTO
+    // ------------------------------------------------------------------------
+    const isDesfazer = /^(apagar|excluir|deletar|remover|desfazer|cancelar)\s*(ultimo|ultima|lancamento|gasto)?$/i.test(txtLimpo.trim());
+
+    if (isDesfazer) {
+      const ultimoSnap = await db.collection('users').doc(userId).collection('transacoes')
+        .orderBy('criadoEm', 'desc')
+        .limit(1)
+        .get();
+
+      if (ultimoSnap.empty) {
+        await sock.sendMessage(remoteJid, { text: '⚠️ Nenhum lançamento encontrado para apagar.' });
+        return;
+      }
+
+      const docRecente = ultimoSnap.docs[0];
+      const dadosRecentes = docRecente.data();
+
+      if (dadosRecentes.mensagem_original) {
+        const loteSnap = await db.collection('users').doc(userId).collection('transacoes')
+          .where('mensagem_original', '==', dadosRecentes.mensagem_original)
+          .get();
+
+        const tempoBase = dadosRecentes.criadoEm?.toMillis ? dadosRecentes.criadoEm.toMillis() : Date.now();
+        const docsParaApagar = loteSnap.docs.filter(d => {
+          const t = d.data().criadoEm?.toMillis ? d.data().criadoEm.toMillis() : tempoBase;
+          return Math.abs(tempoBase - t) < 120000;
+        });
+
+        if (docsParaApagar.length > 1) {
+          const batch = db.batch();
+          let totalRemovido = 0;
+          docsParaApagar.forEach(d => {
+            totalRemovido += Number(d.data().valor || 0);
+            batch.delete(d.ref);
+          });
+          await batch.commit();
+
+          await sock.sendMessage(remoteJid, {
+            text: `🗑️ *Último envio desfeito!*\nForam removidos *${docsParaApagar.length} lançamentos* vinculados (Total: R$ ${totalRemovido.toFixed(2)}).`
+          });
+          return;
+        }
+      }
+
+      await docRecente.ref.delete();
+      await sock.sendMessage(remoteJid, {
+        text: `🗑️ *Lançamento removido com sucesso!*\n• ${dadosRecentes.descricao} [${dadosRecentes.categoria}] — R$ ${Number(dadosRecentes.valor || 0).toFixed(2)}`
+      });
+      return;
+    }
+
+    // ------------------------------------------------------------------------
+    // MODO 1: CONSULTOR FINANCEIRO (Responde sobre Limites, Cartões e Saldo)
     // ------------------------------------------------------------------------
     const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite|disponivel|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi/i.test(txtLimpo);
     
@@ -267,7 +321,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       const snap = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
       const transMes = snap.docs.map(d => d.data());
 
-      // A) Perguntou sobre uma CATEGORIA específica (ex: "Qual o limite de alimentação?")
+      // A) Categoria específica
       const catPerguntada = categorias.find(cat => txtLimpo.includes(semAcento(cat)));
       if (catPerguntada) {
         const gastoCat = transMes
@@ -295,7 +349,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // B) Perguntou sobre um CARTÃO específico (ex: "Qual a fatura do VISA?")
+      // B) Cartão específico
       const cartaoPerguntado = cartoes.find(c => txtLimpo.includes(semAcento(c.nome)));
       if (cartaoPerguntado) {
         const gastoCartao = transMes
@@ -313,7 +367,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // C) Perguntou sobre "cartão" em geral sem dizer qual
+      // C) Cartões em geral
       if (/cartao|cartoes|fatura/i.test(txtLimpo)) {
         let msgCartoes = `💳 *Resumo dos seus Cartões (${anoMesAtual})*\n\n`;
         for (const c of cartoes) {
@@ -327,7 +381,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // D) Resumo Geral do Mês
+      // D) Resumo Geral
       const rec = transMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
       const desp = transMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
 
@@ -340,7 +394,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     // ------------------------------------------------------------------------
     // MODO 2: LANÇAMENTOS (Simples, Múltiplos ou Parcelados)
     // ------------------------------------------------------------------------
-    // Converte decimais com vírgula (50,00 -> 50.00) antes de separar a frase por vírgula
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
     let respostas = [];
@@ -348,7 +401,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     for (const parte of partes) {
       const pLimpo = semAcento(parte);
 
-      // Identifica se tem parcelamento (ex: "3x", "3 vezes")
       const matchParcelas = pLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
       const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
 
