@@ -4,7 +4,7 @@ import {
   Plus, Trash2, QrCode, Send, LogOut, BarChart2, Calendar, 
   FolderPlus, Target, AlertTriangle, Sparkles, CheckCircle2, 
   Clock, Zap, BrainCircuit, RefreshCw, Landmark, 
-  Edit3, X, ShieldAlert, Search, ArrowUpDown, FileText
+  Edit3, X, ShieldAlert, Search, FileText, BellRing
 } from 'lucide-react';
 import { db, auth } from './firebaseConfig';
 import { 
@@ -42,13 +42,13 @@ export default function App() {
   const [abaAtiva, setAbaAtiva] = useState('dashboard');
   const [transacoes, setTransacoes] = useState([]);
 
-  // Cartões de Crédito
+  // Cartões de Crédito (Com Limite, Fechamento, Vencimento e Melhor Dia)
   const [cartoes, setCartoes] = useState([
     { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12, banco: 'Itaú' },
     { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17, banco: 'Nubank' }
   ]);
 
-  // Bancos e Contas (Saldos)
+  // Bancos e Contas (Saldos Individuais)
   const [bancos, setBancos] = useState([
     { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 1500 },
     { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
@@ -56,6 +56,10 @@ export default function App() {
   
   const [categorias, setCategorias] = useState(['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
   const [orcamentos, setOrcamentos] = useState({});
+  const [contasFixas, setContasFixas] = useState([
+    { id: 'f1', nome: 'Energia Elétrica', valorPadrao: 180, diaVencimento: 15, categoria: 'Contas' },
+    { id: 'f2', nome: 'Internet Fibra', valorPadrao: 120, diaVencimento: 10, categoria: 'Contas' }
+  ]);
 
   const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
   const [whatsappQrCode, setWhatsappQrCode] = useState(null);
@@ -67,10 +71,13 @@ export default function App() {
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
   const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
 
-  // Estados de Formulários - Categorias
+  // Estados de Formulários - Categorias e Lembretes Fixos
   const [novaCatNome, setNovaCatNome] = useState('');
   const [orcamentoCat, setOrcamentoCat] = useState('');
   const [orcamentoValor, setOrcamentoValor] = useState('');
+  const [fixaNome, setFixaNome] = useState('');
+  const [fixaValor, setFixaValor] = useState('');
+  const [fixaDia, setFixaDia] = useState('');
 
   // Estados de Formulários - Cadastro e Edição de Cartões e Bancos
   const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
@@ -104,7 +111,7 @@ export default function App() {
     cartaoNome: 'VISA',
     categoria: 'Alimentação'
   });
-  const [modalPagarFatura, setModalPagarFatura] = useState(null); // { cartaoNome, valorFatura, tipoPagamento: 'TOTAL' | 'PARCIAL', valorPago: '', bancoSaida: '' }
+  const [modalPagarFatura, setModalPagarFatura] = useState(null);
   const [transacaoEditando, setTransacaoEditando] = useState(null);
 
   // Estados do Simulador de WhatsApp
@@ -113,7 +120,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovos comandos disponíveis:\n1️⃣ Agendar conta: "Água vence 25/10 valor 85,00"\n2️⃣ Consultar: "contas a vencer" ou "contas proximas do vencimento"\n3️⃣ Esquecer método: "Gastei 50 na padaria" (eu pergunto qual foi!)' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nTodos os recursos estão ativos:\n1️⃣ Agendar vencimento: "Água vence 25/10 valor 85,00"\n2️⃣ Consultar: "contas a vencer" ou "contas proximas do vencimento"\n3️⃣ Sem método: "Gastei 50 na padaria" (eu pergunto qual foi!)\n4️⃣ Cartões e Saldos: "Qual meu saldo?" ou "Fatura do VISA"\n5️⃣ Apagar: "desfazer"' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -133,6 +140,7 @@ export default function App() {
           if (dados.orcamentos) setOrcamentos(dados.orcamentos);
           if (dados.cartoes) setCartoes(dados.cartoes);
           if (dados.bancos) setBancos(dados.bancos);
+          if (dados.contasFixas) setContasFixas(dados.contasFixas);
           if (dados.whatsapp_status) setWhatsappStatus(dados.whatsapp_status);
           if (dados.whatsapp_qrcode) setWhatsappQrCode(dados.whatsapp_qrcode);
         } else {
@@ -141,6 +149,7 @@ export default function App() {
             orcamentos: {}, 
             cartoes, 
             bancos,
+            contasFixas,
             whatsapp_status: 'DISCONNECTED' 
           }, { merge: true });
         }
@@ -165,6 +174,7 @@ export default function App() {
         if (data.whatsapp_qrcode !== undefined) setWhatsappQrCode(data.whatsapp_qrcode);
         if (data.cartoes) setCartoes(data.cartoes);
         if (data.bancos) setBancos(data.bancos);
+        if (data.contasFixas) setContasFixas(data.contasFixas);
       }
     });
 
@@ -250,6 +260,15 @@ export default function App() {
     }
   };
 
+  const dispararTesteAlertaWhatsApp = async () => {
+    try {
+      await fetch(`${RENDER_API_URL}/verificar-alertas`);
+      alert('🔔 O comando de verificação de alertas de vencimento foi enviado para o seu WhatsApp!');
+    } catch (e) {
+      alert('Erro ao acionar verificação no servidor.');
+    }
+  };
+
   // ==========================================================================
   // GESTÃO DE BANCOS E CARTÕES (CADASTRO E EDIÇÃO)
   // ==========================================================================
@@ -328,7 +347,7 @@ export default function App() {
   };
 
   // ==========================================================================
-  // GESTÃO DE CONTAS A VENCER & A RECEBER
+  // GESTÃO DE CONTAS A VENCER, A RECEBER E LEMBRETES RECORRENTES
   // ==========================================================================
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
@@ -361,6 +380,49 @@ export default function App() {
       pago: novoStatus,
       metodo: novoStatus && transacao.metodo === 'BOLETO / AGENDADO' ? 'PIX/BOLETO' : transacao.metodo,
       banco_nome: transacao.banco_nome || bancos[0]?.nome || null
+    });
+  };
+
+  const adicionarContaFixa = async (e) => {
+    e.preventDefault();
+    if (!fixaNome || !fixaValor || !user) return;
+    const novas = [...contasFixas, {
+      id: Date.now().toString(),
+      nome: fixaNome,
+      valorPadrao: Number(fixaValor),
+      diaVencimento: Number(fixaDia) || 10,
+      categoria: 'Contas'
+    }];
+    setContasFixas(novas);
+    setFixaNome('');
+    setFixaValor('');
+    setFixaDia('');
+    await setDoc(doc(db, 'users', user.uid), { contasFixas: novas }, { merge: true });
+  };
+
+  const excluirContaFixa = async (id) => {
+    const novas = contasFixas.filter(c => c.id !== id);
+    setContasFixas(novas);
+    await setDoc(doc(db, 'users', user.uid), { contasFixas: novas }, { merge: true });
+  };
+
+  const pagarContaFixaRapido = async (conta) => {
+    if (!user) return;
+    const diaStr = String(conta.diaVencimento || 10).padStart(2, '0');
+    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+      descricao: conta.nome,
+      valor: Number(conta.valorPadrao),
+      tipo: 'DESPESA',
+      metodo: 'PIX/BOLETO',
+      cartao_nome: null,
+      banco_nome: bancos[0]?.nome || null,
+      categoria: conta.categoria || 'Contas',
+      pago: true,
+      data_vencimento: `${filtroMesAno}-${diaStr}`,
+      anoMes: filtroMesAno,
+      conta_fixa_id: conta.id,
+      mensagem_original: `Baixa de conta fixa recorrente: ${conta.nome}`,
+      criadoEm: serverTimestamp()
     });
   };
 
@@ -433,7 +495,6 @@ export default function App() {
           fatura_paga: true
         });
       }
-      // Registra a saída do dinheiro da conta bancária selecionada para abater no Saldo do Banco
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
         descricao: `Pagamento Total Fatura ${cartaoNome}`,
         valor: modalPagarFatura.valorFatura,
@@ -448,7 +509,6 @@ export default function App() {
         criadoEm: serverTimestamp()
       });
     } else {
-      // Pagamento Parcial: gera um abatimento negativo na fatura do cartão (liberando limite parcial) e debita do banco
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
         descricao: `Pagamento Parcial / Antecipação (${cartaoNome})`,
         valor: -Math.abs(valorPagarNum),
@@ -685,8 +745,21 @@ export default function App() {
           `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${dados.categoria}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
         );
       } else {
+        let alertaExtra = '';
+        if (dados.metodo === 'CREDITO' && dados.cartao_nome) {
+          const cObj = cartoes.find(c => c.nome.toLowerCase() === dados.cartao_nome.toLowerCase());
+          if (cObj && cObj.limite > 0) {
+            const compAtual = transacoes
+              .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cObj.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
+              .reduce((a, b) => a + Number(b.valor || 0), 0) + (dados.valorParcela * pTotal);
+            const pct = Math.round((compAtual / cObj.limite) * 100);
+            const disp = cObj.limite - compAtual;
+            if (pct >= 100) alertaExtra += `\n🚨 *ALERTA:* Limite do cartão ${cObj.nome} estourado! (${pct}%)`;
+            else if (pct >= 80) alertaExtra += `\n⚠️ *Atenção:* ${pct}% do limite do ${cObj.nome} comprometido! Restam R$ ${disp.toFixed(2)}`;
+          }
+        }
         resumoRespostas.push(
-          `✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} (${dados.cartao_nome || dados.metodo})`
+          `✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} (${dados.cartao_nome || dados.metodo})${alertaExtra}`
         );
       }
     }
@@ -770,7 +843,7 @@ export default function App() {
         const prox = transacoes.filter(t => {
           if (t.pago !== false || !t.data_vencimento) return false;
           const dt = new Date(t.data_vencimento + 'T00:00:00');
-          return dt >= hojeZero && dt <= limite5;
+          return dt <= limite5;
         });
 
         if (prox.length === 0) {
@@ -796,7 +869,42 @@ export default function App() {
         return;
       }
 
-      // 4. Lançamentos
+      // 4. Consultas de Saldo e Cartão
+      const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite|posso gastar/i.test(txtLower) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLower);
+      if (isPergunta) {
+        const transMes = transacoes.filter(t => t.anoMes === filtroMesAno);
+        const cartaoPerguntado = cartoes.find(c => txtLower.includes(c.nome.toLowerCase()));
+        if (cartaoPerguntado) {
+          const faturaMes = transMes
+            .filter(t => t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase() && !t.fatura_paga)
+            .reduce((a, b) => a + Number(b.valor || 0), 0);
+          const compTotal = transacoes
+            .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
+            .reduce((a, b) => a + Number(b.valor || 0), 0);
+          const disp = cartaoPerguntado.limite - compTotal;
+
+          setHistoricoChat(prev => [...prev, {
+            autor: 'bot',
+            texto: `💳 *Cartão ${cartaoPerguntado.nome} (${filtroMesAno})*\n\n` +
+                   `• Fatura do mês: *R$ ${faturaMes.toFixed(2)}*\n` +
+                   `• Limite disponível real: *R$ ${disp.toFixed(2)}*\n` +
+                   `• Melhor dia de compra: *Dia ${cartaoPerguntado.diaFechamento || 5}*`
+          }]);
+          setProcessando(false);
+          return;
+        }
+
+        const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false).reduce((a, b) => a + Number(b.valor || 0), 0);
+        const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA').reduce((a, b) => a + Number(b.valor || 0), 0);
+        setHistoricoChat(prev => [...prev, {
+          autor: 'bot',
+          texto: `📊 *Resumo FinZap (${filtroMesAno})*\n\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Resultado: R$ ${(rec - desp).toFixed(2)}*`
+        }]);
+        setProcessando(false);
+        return;
+      }
+
+      // 5. Lançamentos
       const textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
       const partes = textoNormalizado.split(/(?:,|\s+e\s+|\s*;\s*|\n+)/i).map(p => p.trim()).filter(Boolean);
       const itensExtraidos = partes.map(interpretarItemUnico).filter(Boolean);
@@ -904,7 +1012,6 @@ export default function App() {
   // ==========================================================================
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
   
-  // Receitas e Despesas efetivadas do mês (exclui transferências de pagamento de fatura para não duplicar com gastos do cartão no resumo)
   const totalReceitas = transacoesFiltradas
     .filter(t => t.tipo === 'RECEITA' && t.pago !== false)
     .reduce((acc, t) => acc + Number(t.valor || 0), 0);
@@ -1010,7 +1117,7 @@ export default function App() {
 
   const listaContasVencerReceber = transacoesFiltradas
     .filter(t => {
-      if (t.metodo === 'CREDITO') return false; // Compras no cartão já ficam na fatura
+      if (t.metodo === 'CREDITO') return false;
       if (filtroVencNome && !t.descricao?.toLowerCase().includes(filtroVencNome.toLowerCase())) return false;
       if (filtroVencCat !== 'TODAS' && t.categoria !== filtroVencCat) return false;
       if (filtroVencStatus === 'ABERTO' && t.pago !== false) return false;
@@ -1176,6 +1283,45 @@ export default function App() {
                   </select>
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Forma Pagamento</label>
+                  <select 
+                    value={transacaoEditando.metodo}
+                    onChange={e => setTransacaoEditando({ ...transacaoEditando, metodo: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                  >
+                    <option value="PIX">PIX</option>
+                    <option value="DEBITO">Débito</option>
+                    <option value="CREDITO">Cartão de Crédito</option>
+                    <option value="DINHEIRO">Dinheiro</option>
+                    <option value="BOLETO / AGENDADO">Boleto / Agendado</option>
+                  </select>
+                </div>
+                {transacaoEditando.metodo === 'CREDITO' ? (
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Cartão</label>
+                    <select 
+                      value={transacaoEditando.cartao_nome || cartoes[0]?.nome}
+                      onChange={e => setTransacaoEditando({ ...transacaoEditando, cartao_nome: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                    >
+                      {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
+                    </select>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">Conta Bancária</label>
+                    <select 
+                      value={transacaoEditando.banco_nome || bancos[0]?.nome}
+                      onChange={e => setTransacaoEditando({ ...transacaoEditando, banco_nome: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                    >
+                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                    </select>
+                  </div>
+                )}
+              </div>
               <div className="flex gap-2 pt-2">
                 <button type="submit" className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs">
                   Salvar Alterações
@@ -1189,7 +1335,7 @@ export default function App() {
         </div>
       )}
 
-      {/* SIDEBAR MODERNA */}
+      {/* SIDEBAR MODERNA (COM AS NOVAS ABAS SOLICITADAS) */}
       <aside className="w-full md:w-72 bg-slate-900/50 backdrop-blur-xl border-r border-slate-800/80 p-6 flex flex-col justify-between">
         <div>
           <div className="flex items-center gap-3.5 mb-8">
@@ -1378,7 +1524,7 @@ export default function App() {
                   </div>
 
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
-                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas em Aberto ({filtroMesAno})</span>
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas a Vencer ({filtroMesAno})</span>
                     <p className="text-lg font-bold text-amber-400 mt-1">
                       R$ {transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0).toFixed(2)}
                     </p>
@@ -1503,7 +1649,7 @@ export default function App() {
                 <div className="relative">
                   <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3" />
                   <input 
-                    type="text" placeholder="Pesquisar por nome ou categoria no extrato..."
+                    type="text" placeholder="Pesquisar por descrição ou categoria no extrato..."
                     value={pesquisaExtrato} onChange={e => setPesquisaExtrato(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
                   />
@@ -1593,18 +1739,26 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 3: CONTAS A VENCER E A RECEBER (COM FILTROS E AGENDAMENTO)
+              ABA 3: CONTAS A VENCER & A RECEBER (COM FILTROS E ALERTAS WHATSAPP)
           ================================================================ */}
           {abaAtiva === 'vencimentos' && (
             <div className="space-y-6">
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-4 shadow-xl">
-                <div>
-                  <h2 className="text-lg font-bold flex items-center gap-2">
-                    <Clock className="w-5 h-5 text-amber-400" /> Lançar Conta a Vencer ou Valor a Receber
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Cadastre boletos futuros ou valores a receber. Pelo WhatsApp basta enviar: <em>"Água vence 25/10 valor 80,00"</em>.
-                  </p>
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                      <Clock className="w-5 h-5 text-amber-400" /> Lançar Conta a Vencer ou Valor a Receber
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Pelo WhatsApp basta enviar: <em>"Água vence 25/10 valor 80,00"</em> ou perguntar <em>"contas a vencer"</em>.
+                    </p>
+                  </div>
+                  <button 
+                    onClick={dispararTesteAlertaWhatsApp}
+                    className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
+                  >
+                    <BellRing className="w-3.5 h-3.5" /> Testar Alerta de Hoje no WhatsApp
+                  </button>
                 </div>
 
                 <form onSubmit={lancarContaAgendada} className="grid grid-cols-1 sm:grid-cols-6 gap-3">
@@ -1721,6 +1875,47 @@ export default function App() {
                   ))
                 )}
               </div>
+
+              {/* LEMBRETES FIXOS RECORRENTES TODO MÊS (EX: DIA 15 ENERGIA) */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                    <BellRing className="w-4 h-4 text-emerald-400" /> Lembretes Fixos Mensais no WhatsApp (Ex: Todo dia 15 Energia)
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Contas que se repetem todo mês e disparam aviso no WhatsApp no dia do vencimento se ainda não constarem pagas.
+                  </p>
+                </div>
+                <form onSubmit={adicionarContaFixa} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <input type="text" placeholder="Nome (ex: Energia)" value={fixaNome} onChange={e => setFixaNome(e.target.value)} className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200" />
+                  <input type="number" placeholder="Valor Padrão (R$)" value={fixaValor} onChange={e => setFixaValor(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200" />
+                  <input type="number" min="1" max="31" placeholder="Dia Venc. (ex: 15)" value={fixaDia} onChange={e => setFixaDia(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200" />
+                  <button type="submit" className="sm:col-span-4 bg-slate-800 hover:bg-slate-700 text-emerald-400 py-2.5 rounded-xl font-semibold text-xs transition">+ Adicionar Lembrete Fixo Mensal</button>
+                </form>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {contasFixas.map(cf => {
+                    const jaPaga = transacoesFiltradas.some(
+                      t => (t.conta_fixa_id === cf.id || t.descricao?.toLowerCase().includes(cf.nome.toLowerCase())) && t.pago !== false
+                    );
+                    return (
+                      <div key={cf.id} className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between">
+                        <div>
+                          <p className="text-xs font-bold text-slate-200">{cf.nome}</p>
+                          <p className="text-[11px] text-slate-400">Todo dia {cf.diaVencimento} • R$ {Number(cf.valorPadrao).toFixed(2)}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {jaPaga ? (
+                            <span className="text-[11px] text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-1 rounded-lg">Pago no mês</span>
+                          ) : (
+                            <button onClick={() => pagarContaFixaRapido(cf)} className="text-[11px] bg-amber-500 text-slate-950 font-semibold px-2.5 py-1 rounded-lg">Dar Baixa</button>
+                          )}
+                          <button onClick={() => excluirContaFixa(cf.id)} className="text-slate-500 hover:text-rose-400 p-1"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
 
@@ -1741,7 +1936,7 @@ export default function App() {
                   onClick={() => setAbaAtiva('bancos')}
                   className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2.5 rounded-xl text-xs font-semibold transition"
                 >
-                  + Gerenciar Contas / Saldo Inicial
+                  + Editar Contas / Saldo Inicial
                 </button>
               </div>
 
@@ -2218,7 +2413,7 @@ export default function App() {
             </div>
             <div>
               <h3 className="font-bold text-sm text-emerald-300">Simulador do WhatsApp</h3>
-              <p className="text-xs text-emerald-500/80 font-medium">Vencimentos & Consultas Rápidas</p>
+              <p className="text-xs text-emerald-500/80 font-medium">Vencimentos, Perguntas & Gastos</p>
             </div>
           </div>
 
@@ -2238,9 +2433,10 @@ export default function App() {
           </div>
 
           <div className="p-2.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2 overflow-x-auto">
-            <button type="button" onClick={() => setMsgWhats('Água vence 25/10 valor 85,00')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">📅 Agendar Água 25/10</button>
-            <button type="button" onClick={() => setMsgWhats('contas a vencer')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">📋 "contas a vencer"</button>
-            <button type="button" onClick={() => setMsgWhats('contas proximas do vencimento')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">⏳ "próximas 5 dias"</button>
+            <button type="button" onClick={() => setMsgWhats('Água vence 25/10 valor 85,00')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">📅 Agendar 25/10</button>
+            <button type="button" onClick={() => setMsgWhats('Gastei 45,00 na padaria')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">❓ Sem método</button>
+            <button type="button" onClick={() => setMsgWhats('contas a vencer')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">📋 "contas a vencer"</button>
+            <button type="button" onClick={() => setMsgWhats('contas proximas do vencimento')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-rose-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">⏳ "próximas 5 dias"</button>
           </div>
 
           <form onSubmit={handleEnviarWhatsApp} className="p-3.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2.5">
