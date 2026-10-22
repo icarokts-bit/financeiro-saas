@@ -9,9 +9,11 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
   console.error('❌ ERRO: Variável FIREBASE_SERVICE_ACCOUNT não configurada!');
 } else {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
+  if (!admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+  }
 }
 
 const db = admin.firestore();
@@ -25,27 +27,53 @@ app.get('/', (req, res) => {
   res.json({ status: 'online', service: 'FinZap WhatsApp Worker (Firestore Auth)', activeSessions: sessions.size });
 });
 
+// Quando clica no botão "Gerar QR Code" no painel, limpa sessão travada e gera um novo QR Code
 app.post('/conectar', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
-  startWhatsAppForUser(userId);
-  res.json({ ok: true, message: 'Iniciando conexão com o Firestore...' });
+
+  try {
+    // Se já houver um socket antigo travado, encerra antes de gerar novo QR
+    const sockAntigo = sessions.get(userId);
+    if (sockAntigo) {
+      try { sockAntigo.end(); } catch (e) {}
+      sessions.delete(userId);
+    }
+
+    // Limpa credenciais antigas corrompidas para forçar a criação de um QR Code novo
+    const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
+    const docs = await sessionRef.get();
+    if (!docs.empty) {
+      const batch = db.batch();
+      docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+
+    startWhatsAppForUser(userId);
+    res.json({ ok: true, message: 'Gerando novo QR Code...' });
+  } catch (err) {
+    console.error('Erro na rota /conectar:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/desconectar', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
+
   const sock = sessions.get(userId);
   if (sock) {
     try { await sock.logout(); } catch (e) {}
     sessions.delete(userId);
   }
-  
+
   const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
   const docs = await sessionRef.get();
-  const batch = db.batch();
-  docs.forEach(d => batch.delete(d.ref));
-  await batch.commit();
+  if (!docs.empty) {
+    const batch = db.batch();
+    docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  }
 
   await db.collection('users').doc(userId).set({
     whatsapp_status: 'DISCONNECTED',
@@ -55,22 +83,29 @@ app.post('/desconectar', async (req, res) => {
   res.json({ ok: true });
 });
 
-// ADAPTADOR DE AUTENTICAÇÃO DO BAILEYS PARA O FIRESTORE
-function useFirestoreAuthState(userId) {
+// ADAPTADOR CORRIGIDO (ASYNC) DO BAILEYS PARA O FIRESTORE
+async function useFirestoreAuthState(userId) {
   const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
 
+  // O Firestore não aceita caracteres '/' no ID do documento
+  const fixId = (id) => id.replace(/\//g, '__').replace(/\./g, '_');
+
   const writeData = async (data, id) => {
-    const jsonString = JSON.stringify(data, BufferJSON.replacer);
-    const json = JSON.parse(jsonString);
-    await sessionRef.doc(id).set(json);
+    try {
+      const jsonString = JSON.stringify(data, BufferJSON.replacer);
+      await sessionRef.doc(fixId(id)).set({ payload: jsonString });
+    } catch (err) {
+      console.error('Erro ao salvar chave no Firestore:', err);
+    }
   };
 
   const readData = async (id) => {
     try {
-      const doc = await sessionRef.doc(id).get();
-      if (!doc.exists) return null;
-      const jsonString = JSON.stringify(doc.data(), BufferJSON.reviver);
-      return JSON.parse(jsonString, BufferJSON.reviver);
+      const docSnap = await sessionRef.doc(fixId(id)).get();
+      if (!docSnap.exists) return null;
+      const { payload } = docSnap.data();
+      if (!payload) return null;
+      return JSON.parse(payload, BufferJSON.reviver);
     } catch (error) {
       return null;
     }
@@ -78,26 +113,25 @@ function useFirestoreAuthState(userId) {
 
   const removeData = async (id) => {
     try {
-      await sessionRef.doc(id).delete();
+      await sessionRef.doc(fixId(id)).delete();
     } catch (error) {}
   };
 
+  // IMPORTANTE: creds precisa ser um objeto resolvido com await!
+  const creds = (await readData('creds')) || initAuthCreds();
+
   return {
     state: {
-      creds: async () => {
-        let creds = await readData('creds');
-        return creds || initAuthCreds();
-      },
+      creds,
       keys: {
         get: async (type, ids) => {
           const data = {};
-          for (const id of ids) {
-            let value = await readData(`${type}-${id}`);
-            if (type === 'app-state-sync-key' && value) {
-              value = BufferJSON.reviver('', value);
-            }
-            data[id] = value;
-          }
+          await Promise.all(
+            ids.map(async (id) => {
+              let value = await readData(`${type}-${id}`);
+              data[id] = value;
+            })
+          );
           return data;
         },
         set: async (data) => {
@@ -106,24 +140,21 @@ function useFirestoreAuthState(userId) {
             for (const id of Object.keys(data[category])) {
               const value = data[category][id];
               const key = `${category}-${id}`;
-              if (value) {
-                tasks.push(writeData(value, key));
-              } else {
-                tasks.push(removeData(key));
-              }
+              tasks.push(value ? writeData(value, key) : removeData(key));
             }
           }
           await Promise.all(tasks);
         }
       }
     },
-    saveCreds: async () => {}
+    saveCreds: () => writeData(creds, 'creds')
   };
 }
 
 async function startWhatsAppForUser(userId) {
   try {
-    const { state, saveCreds } = useFirestoreAuthState(userId);
+    console.log(`⚡ Iniciando instância WhatsApp para userId: ${userId}`);
+    const { state, saveCreds } = await useFirestoreAuthState(userId);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -135,32 +166,40 @@ async function startWhatsAppForUser(userId) {
     });
 
     sessions.set(userId, sock);
-    sock.ev.on('creds.update', async () => {
-      const creds = await state.creds();
-      await db.collection('users').doc(userId).collection('whatsapp_session').doc('creds').set(JSON.parse(JSON.stringify(creds, BufferJSON.replacer)));
-      saveCreds();
-    });
+    sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       const userRef = db.collection('users').doc(userId);
 
       if (qr) {
+        console.log(`📱 Novo QR Code gerado para: ${userId}`);
         const qrBase64 = await QRCode.toDataURL(qr);
-        await userRef.set({ whatsapp_status: 'WAITING_QR', whatsapp_qrcode: qrBase64 }, { merge: true });
+        await userRef.set({
+          whatsapp_status: 'WAITING_QR',
+          whatsapp_qrcode: qrBase64
+        }, { merge: true });
       }
 
       if (connection === 'open') {
-        await userRef.set({ whatsapp_status: 'CONNECTED', whatsapp_qrcode: null }, { merge: true });
-        console.log(`✅ WhatsApp conectado e salvo no Firebase para: ${userId}`);
+        console.log(`✅ WhatsApp CONECTADO para: ${userId}`);
+        await userRef.set({
+          whatsapp_status: 'CONNECTED',
+          whatsapp_qrcode: null
+        }, { merge: true });
       }
 
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
+        console.log(`⚠️ Conexão fechada para ${userId}. StatusCode: ${statusCode}`);
+
         if (statusCode !== DisconnectReason.loggedOut) {
           setTimeout(() => startWhatsAppForUser(userId), 4000);
         } else {
-          await userRef.set({ whatsapp_status: 'DISCONNECTED', whatsapp_qrcode: null }, { merge: true });
+          await userRef.set({
+            whatsapp_status: 'DISCONNECTED',
+            whatsapp_qrcode: null
+          }, { merge: true });
           sessions.delete(userId);
         }
       }
@@ -174,13 +213,13 @@ async function startWhatsAppForUser(userId) {
       const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
       if (!texto) return;
 
-      if (texto.startsWith('✅') || texto.startsWith('📊') || texto.startsWith('💳') || texto.startsWith('🤖')) return;
+      if (texto.startsWith('✅') || texto.startsWith('📊') || texto.startsWith('💳') || texto.startsWith('🤖') || texto.startsWith('📂')) return;
 
       await processarMensagemInteligente(userId, texto, sock, msg.key.remoteJid);
     });
 
   } catch (err) {
-    console.error('Erro ao iniciar WhatsApp com Firestore:', err);
+    console.error('❌ Erro ao iniciar WhatsApp com Firestore:', err);
   }
 }
 
@@ -209,17 +248,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       return;
     }
 
-    // 2. Normalização: unifica números decimais (ex: 50,00 vira 50.00 para não quebrar na vírgula)
+    // 2. Normalização de decimais (50,00 -> 50.00) para não fatiar na vírgula
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
-
-    // Divide por vírgulas ou pela conjunção "e"
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
     let respostas = [];
 
     for (const parte of partes) {
       const pLow = parte.toLowerCase();
-      
-      // Procura o valor numérico correto (agora com ponto decimal)
       const matchValor = parte.match(/(\d+\.\d{2}|\d+)/);
       if (!matchValor) continue;
 
@@ -229,7 +264,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       const isReceita = /recebi|ganhei|salário|salario|venda/i.test(pLow);
       const tipo = isReceita ? 'RECEITA' : 'DESPESA';
 
-      // Identifica método e cartão individual do item
       let metodo = 'PIX/DINHEIRO';
       let cartaoNome = null;
       if (/crédito|credito|cartão|cartao/i.test(pLow)) {
@@ -247,7 +281,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         metodo = 'PIX';
       }
 
-      // Identifica Categoria
       let categoria = isReceita ? 'Receita' : 'Outros';
       if (/mercado|supermercado|compras|cebola/i.test(pLow)) categoria = 'Mercado';
       else if (/lanche|restaurante|ifood|padaria|almoço|jantar|burger|pizza/i.test(pLow)) categoria = 'Alimentação';
@@ -262,9 +295,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         }
       }
 
-      // Limpeza da descrição do gasto
       let descricao = parte
-        .replace(/no pix|no credito|no débito|credito|debito|pix|reais|r\$/gi, '')
+        .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|no pix|no credito|no débito|credito|debito|pix|reais|r\$|de |do |da |no |na /gi, ' ')
         .replace(matchValor[0], '')
         .replace(cartaoNome ? new RegExp(cartaoNome, 'gi') : '', '')
         .replace(/\s+/g, ' ')
@@ -305,7 +337,7 @@ async function restaurarSessoesAtivas() {
       .get();
 
     usersSnap.forEach(doc => {
-      console.log(`🔄 A restaurar sessão automática para o utilizador: ${doc.id}`);
+      console.log(`🔄 Restaurando sessão automática para o usuário: ${doc.id}`);
       startWhatsAppForUser(doc.id);
     });
   } catch (err) {
@@ -315,6 +347,6 @@ async function restaurarSessoesAtivas() {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 FinZap WhatsApp Server (Firestore Auth) a rodar na porta ${PORT}`);
+  console.log(`🚀 FinZap WhatsApp Server (Firestore Auth) rodando na porta ${PORT}`);
   restaurarSessoesAtivas();
 });
