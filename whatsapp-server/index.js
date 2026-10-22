@@ -297,5 +297,24 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
   }
 }
 
+// Reconecta automaticamente todas as sessões ativas no Firestore quando o servidor reinicia
+async function restaurarSessoesAtivas() {
+  try {
+    const usersSnap = await db.collection('users')
+      .where('whatsapp_status', '==', 'CONNECTED')
+      .get();
+
+    usersSnap.forEach(doc => {
+      console.log(`🔄 A restaurar sessão automática para o utilizador: ${doc.id}`);
+      startWhatsAppForUser(doc.id);
+    });
+  } catch (err) {
+    console.error('Erro ao restaurar sessões:', err);
+  }
+}
+
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🚀 FinZap WhatsApp Server (Firestore Auth) rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 FinZap WhatsApp Server (Firestore Auth) a rodar na porta ${PORT}`);
+  restaurarSessoesAtivas();
+});
