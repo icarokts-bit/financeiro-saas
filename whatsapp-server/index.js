@@ -24,7 +24,6 @@ app.use(express.json());
 
 const sessions = new Map();
 const userJids = new Map();
-// Cache de mensagens enviadas para evitar o erro "Aguardando mensagem" no WhatsApp
 const sentMessagesCache = new Map();
 
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
@@ -35,7 +34,7 @@ const formatarDataBR = (isoDate) => {
   return `${d}/${m}/${a}`;
 };
 
-// Função segura de envio que guarda a mensagem no cache de retry do protocolo Signal
+// Envio seguro com cache para evitar o aviso "Aguardando mensagem"
 async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   const msgEnviada = await sock.sendMessage(remoteJid, conteudo);
   if (msgEnviada?.key?.id && msgEnviada?.message) {
@@ -48,7 +47,7 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   return msgEnviada;
 }
 
-// Rota principal super leve para o cron-job.org
+// Rota principal leve para o cron-job.org
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
   res.status(200).send('OK');
@@ -113,14 +112,13 @@ app.post('/desconectar', async (req, res) => {
 });
 
 // ============================================================================
-// 2. ADAPTADOR DE AUTENTICAÇÃO COM CACHE EM MEMÓRIA (EVITA ERRO DE CRIPTOGRAFIA)
+// 2. ADAPTADOR DE AUTENTICAÇÃO COM CACHE EM MEMÓRIA
 // ============================================================================
 async function useFirestoreAuthState(userId) {
   const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
   const fixId = (id) => id.replace(/\//g, '__').replace(/\./g, '_');
   const localCache = new Map();
 
-  // Pré-carrega todas as chaves existentes na memória para leitura instantânea pelo Signal
   try {
     const allDocs = await sessionRef.get();
     allDocs.forEach(doc => {
@@ -204,11 +202,11 @@ async function useFirestoreAuthState(userId) {
 }
 
 // ============================================================================
-// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM GETMESSAGE ANTI-FALHA DE CIFRA)
+// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM DETEÇÃO CORRETA DE @LID E PRÓPRIO NÚMERO)
 // ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
-    console.log(`⚡ Iniciando instância WhatsApp para userId: ${userId}`);
+    console.log(`⚡ A iniciar instância WhatsApp para userId: ${userId}`);
     const { state, saveCreds } = await useFirestoreAuthState(userId);
     const { version } = await fetchLatestBaileysVersion();
 
@@ -221,7 +219,6 @@ async function startWhatsAppForUser(userId) {
       keepAliveIntervalMs: 25000,
       syncFullHistory: false,
       markOnlineOnConnect: false,
-      // Essencial para o WhatsApp re-encriptar a mensagem caso apareça "Aguardando mensagem"
       getMessage: async (key) => {
         if (sentMessagesCache.has(key.id)) {
           return sentMessagesCache.get(key.id);
@@ -278,20 +275,20 @@ async function startWhatsAppForUser(userId) {
 
       const remoteJid = msg.key.remoteJid || '';
 
-      // Bloqueia grupos, canais e conversas com outras pessoas
+      // 1. Ignora grupos, listas de transmissão e canais
       if (remoteJid.endsWith('@g.us') || remoteJid.includes('broadcast') || remoteJid.includes('newsletter')) return;
 
-      const meuNumero = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : '';
-      const meuLid = sock.user?.lid ? sock.user.lid.split(':')[0].split('@')[0] : '';
-      const destinoNumero = remoteJid.split(':')[0].split('@')[0];
+      const texto = (
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.ephemeralMessage?.message?.conversation ||
+        msg.message.ephemeralMessage?.message?.extendedTextMessage?.text ||
+        ''
+      ).trim();
 
-      const isChatProprio = (meuNumero && destinoNumero === meuNumero) || (meuLid && destinoNumero === meuLid);
-      if (!isChatProprio) return;
-
-      const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
       if (!texto) return;
 
-      // Filtro anti-loop de mensagens enviadas pelo próprio robô
+      // 2. Filtro anti-loop de mensagens enviadas pelo próprio robô
       if (
         texto.startsWith('✅') || 
         texto.startsWith('📊') || 
@@ -311,6 +308,22 @@ async function startWhatsAppForUser(userId) {
         texto.startsWith('🟢')
       ) return;
 
+      // 3. Verificação inteligente do chat "Mensagens para mim" (suporta @s.whatsapp.net e @lid)
+      const meuNumero = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].split('@')[0];
+      const meuLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].split('@')[0];
+      const destinoNumero = remoteJid.split(':')[0].split('@')[0];
+
+      // No WhatsApp Multi-Device, mensagens enviadas para terceiros usam @s.whatsapp.net com o telefone da outra pessoa.
+      // Já o chat "Mensagens para mim" usa ou o seu próprio número (@s.whatsapp.net) ou o identificador @lid da sua própria conta!
+      const isChatComOutraPessoa = remoteJid.endsWith('@s.whatsapp.net') && meuNumero && destinoNumero !== meuNumero;
+      const isOutroLid = remoteJid.endsWith('@lid') && meuLid && destinoNumero !== meuLid;
+
+      if (isChatComOutraPessoa || isOutroLid) {
+        console.log(`🔒 Ignorando mensagem enviada para terceiro: ${remoteJid}`);
+        return;
+      }
+
+      console.log(`📩 Mensagem recebida no chat pessoal (${remoteJid}): "${texto}"`);
       userJids.set(userId, remoteJid);
       await processarMensagemInteligente(userId, texto, sock, remoteJid);
     });
@@ -452,8 +465,8 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Receita', subcategoria: 'Vendas / Extras', reconhecida: true };
   }
 
-  // 1. Alimentação > Mercado (Hortifruti, Supermercado, Feira, Carnes, Grãos)
-  if (/mercado|supermercado|atacadao|assai|tenda|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|peixe|ovo|leite|pao|queijo|presunto|manteiga|oleo|azeite|acucar|sal|sabao|detergente|papel higienico/i.test(pLimpo)) {
+  // 1. Alimentação > Mercado (Frutas como laranja e maçã, hortifruti, supermercado, carnes)
+  if (/mercado|supermercado|atacadao|assai|tenda|compras|feira|acougue|hortifruti|laranja|maca|banana|uva|morango|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|peixe|ovo|leite|pao|queijo|presunto|manteiga|oleo|azeite|acucar|sal|sabao|detergente|papel higienico/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
 
@@ -515,7 +528,6 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
   const hojeStr = hoje.toISOString().split('T')[0];
   let respostas = [];
 
-  // Lê todas as transações ANTES de inserir as novas para não haver duplicidade nem atraso de indexação
   const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
   const todasTransacoes = snapAll.docs.map(d => d.data());
 
@@ -559,7 +571,6 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       };
 
       await db.collection('users').doc(userId).collection('transacoes').add(novoDoc);
-      // Empurra na lista em memória imediatamente para o cálculo do limite ser 100% exato!
       todasTransacoes.push(novoDoc);
     }
 
@@ -589,7 +600,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       }
     }
 
-    // 2. Alerta de Limite do Cartão de Crédito (100% preciso somando a lista atualizada)
+    // 2. Alerta de Limite do Cartão de Crédito
     if (item.metodo === 'CREDITO' && item.cartao_nome) {
       const objCartao = cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome));
       if (objCartao && Number(objCartao.limite) > 0) {
@@ -766,7 +777,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       await enviarMensagemSegura(sock, remoteJid, {
         text: `🟢 *Conexão FinZap 100% Online!*\n\n` +
               `• Status do Bot: *Conectado e Operacional*\n` +
-              `• Criptografia Signal: *Sincronizada*\n` +
+              `• Chat Identificado: *${remoteJid}*\n` +
               `• Competência Ativa: *${anoMesAtual}*`
       });
       return;
@@ -775,7 +786,11 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     // ------------------------------------------------------------------------
     // MODO -1: TRATAMENTO DE RESPOSTAS PENDENTES (METODO -> BANCO -> CATEGORIA)
     // ------------------------------------------------------------------------
-    if (pendente) {
+    // IMPORTANTE: Se o utilizador enviar uma frase nova com números/valores (ex: "Laranja 10,00"),
+    // cancela a pendência antiga e processa o novo lançamento normalmente!
+    const pareceNovoLancamento = /[a-zA-ZÀ-ÿ]+\s+\d+[,\.]?\d*/.test(textoUsuario) && !/\b(x|vezes|parcelas)\b/i.test(txtLimpo);
+
+    if (pendente && !pareceNovoLancamento) {
       if (/^(cancelar|esquecer|nao|abortar)$/i.test(txtLimpo)) {
         await userRef.set({ pendente_pagamento: null }, { merge: true });
         await enviarMensagemSegura(sock, remoteJid, { text: '🗑️ Operação pendente cancelada.' });
@@ -898,7 +913,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
                 valorParcela: vParc,
                 metodo: metodoEscolhido,
                 cartao_nome: cartaoEscolhido,
-                // Se respondeu apenas "Pix" ou "Débito" sem citar o banco, deixa banco_nome null para ele perguntar de qual conta bancária vai sair!
                 banco_nome: metodoEscolhido === 'CREDITO' ? null : (bancoEscolhido || it.banco_nome || null),
                 pago: true
               };
@@ -943,8 +957,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
           return;
         }
-
-        await userRef.set({ pendente_pagamento: null }, { merge: true });
       }
     }
 
@@ -1361,7 +1373,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MODO 2: LANÇAMENTOS (Com Regex Corrigida para não cortar palavras como "Supermercado")
+    // MODO 2: LANÇAMENTOS (Com Regex Corrigida e Subcategorias)
     // ------------------------------------------------------------------------
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
@@ -1432,7 +1444,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
       const classif = classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategorias);
 
-      // Limpeza de palavras com limites de palavra (\b) para NUNCA cortar o final de "Supermercado" ou "Cartão"
       let descricao = textoSemParcela
         .replace(/\b(fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|a pagar|a receber|dia|no cartao de credito|cartao de credito|no cartao|cartão|cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|um|uma|uns|umas|de|do|da|no|na|em)\b/gi, ' ')
         .replace(/r\$/gi, ' ')
@@ -1482,7 +1493,7 @@ async function restaurarSessoesAtivas() {
       .get();
 
     usersSnap.forEach(doc => {
-      console.log(`🔄 Restaurando sessão automática para o usuário: ${doc.id}`);
+      console.log(`🔄 A restaurar sessão automática para o utilizador: ${doc.id}`);
       startWhatsAppForUser(doc.id);
     });
   } catch (err) {
@@ -1492,6 +1503,6 @@ async function restaurarSessoesAtivas() {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 FinZap WhatsApp Server rodando na porta ${PORT}`);
+  console.log(`🚀 FinZap WhatsApp Server a rodar na porta ${PORT}`);
   restaurarSessoesAtivas();
 });
