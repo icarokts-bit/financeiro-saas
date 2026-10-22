@@ -21,7 +21,7 @@ import {
   PieChart, Pie, Cell 
 } from 'recharts';
 
-// URL do seu servidor WhatsApp hospedado gratuitamente na Render
+// URL do seu servidor WhatsApp na Render
 const RENDER_API_URL = 'https://finzap-whatsapp-api.onrender.com';
 
 export default function App() {
@@ -51,7 +51,7 @@ export default function App() {
   const [whatsappQrCode, setWhatsappQrCode] = useState(null);
   const [carregandoQr, setCarregandoQr] = useState(false);
 
-  // Inputs
+  // Inputs de formulários
   const [novaCatNome, setNovaCatNome] = useState('');
   const [orcamentoCat, setOrcamentoCat] = useState('');
   const [orcamentoValor, setOrcamentoValor] = useState('');
@@ -69,14 +69,14 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nEnvie seus gastos (ex: "Gastei 45 no mercado no pix") ou pergunte "Qual meu saldo?"' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nVocê pode:\n1️⃣ Lançar múltiplos gastos: "Shopping, 50,00 de estacionamento no pix, 100,00 no cinema credito"\n2️⃣ Parcelar: "Comprei tênis 300 em 3x no Nubank"\n3️⃣ Perguntar: "Qual meu saldo?" ou "Fatura do VISA"' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
 
   const CORES_GRAFICO = ['#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa', '#2dd4bf', '#fb7185', '#60a5fa'];
 
-  // Autenticação e Sincronização com Firestore
+  // 1. Autenticação e Carregamento Inicial
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
@@ -92,7 +92,13 @@ export default function App() {
           if (dados.whatsapp_status) setWhatsappStatus(dados.whatsapp_status);
           if (dados.whatsapp_qrcode) setWhatsappQrCode(dados.whatsapp_qrcode);
         } else {
-          await setDoc(userDocRef, { categorias, orcamentos: {}, cartoes, contasFixas, whatsapp_status: 'DISCONNECTED' }, { merge: true });
+          await setDoc(userDocRef, { 
+            categorias, 
+            orcamentos: {}, 
+            cartoes, 
+            contasFixas, 
+            whatsapp_status: 'DISCONNECTED' 
+          }, { merge: true });
         }
       }
       setCarregandoAuth(false);
@@ -100,7 +106,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Monitora status do WhatsApp e Transações em Tempo Real do usuário logado
+  // 2. Listeners em Tempo Real (Status WhatsApp + Transações)
   useEffect(() => {
     if (!user) {
       setTransacoes([]);
@@ -162,6 +168,7 @@ export default function App() {
 
   const handleLogout = async () => await signOut(auth);
 
+  // Conexão com Servidor WhatsApp na Render
   const solicitarConexaoWhatsApp = async () => {
     if (!user) return;
     setCarregandoQr(true);
@@ -172,7 +179,7 @@ export default function App() {
         body: JSON.stringify({ userId: user.uid })
       });
     } catch (e) {
-      alert('Erro ao conectar com o servidor do WhatsApp.');
+      alert('O servidor na Render pode estar acordando. Aguarde 15 segundos e tente novamente.');
     } finally {
       setCarregandoQr(false);
     }
@@ -189,10 +196,11 @@ export default function App() {
       setWhatsappStatus('DISCONNECTED');
       setWhatsappQrCode(null);
     } catch (e) {
-      alert('Erro ao desconectar.');
+      alert('Erro ao desconectar aparelho.');
     }
   };
 
+  // Funções de Gestão (Categorias, Limites, Cartões, Contas Fixas)
   const adicionarCategoria = async (e) => {
     e.preventDefault();
     if (!novaCatNome.trim() || !user) return;
@@ -267,12 +275,79 @@ export default function App() {
       categoria: conta.categoria || 'Contas',
       anoMes: filtroMesAno,
       conta_fixa_id: conta.id,
-      mensagem_original: `Baixa de conta fixa: ${conta.nome}`,
+      mensagem_original: `Baixa automática de conta fixa: ${conta.nome}`,
       criadoEm: serverTimestamp()
     });
   };
 
-  // Simulador de Mensagem WhatsApp no Painel
+  // 3. Simulador Inteligente no Painel (com suporte a decimais com vírgula e múltiplos itens)
+  const interpretarItemUnico = (trecho) => {
+    const txtLower = trecho.toLowerCase();
+    const matchParcelas = txtLower.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+    const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
+
+    const textoSemParcela = matchParcelas ? trecho.replace(matchParcelas[0], '') : trecho;
+    const matchValor = textoSemParcela.match(/(\d+\.\d{2}|\d+)/);
+    if (!matchValor) return null;
+    
+    let valorTotal = parseFloat(matchValor[0]);
+    if (isNaN(valorTotal) || valorTotal <= 0) return null;
+
+    const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
+    const isReceita = /recebi|ganhei|salário|salario|pix recebido|venda|cliente/i.test(txtLower);
+    const tipo = isReceita ? 'RECEITA' : 'DESPESA';
+
+    let metodo = 'PIX/DINHEIRO';
+    if (/crédito|credito|cartão|cartao/i.test(txtLower)) metodo = 'CREDITO';
+    else if (/débito|debito/i.test(txtLower)) metodo = 'DEBITO';
+    else if (/pix/i.test(txtLower)) metodo = 'PIX';
+
+    let cartaoIdentificado = null;
+    for (const c of cartoes) {
+      if (txtLower.includes(c.nome.toLowerCase())) {
+        cartaoIdentificado = c.nome;
+        metodo = 'CREDITO';
+        break;
+      }
+    }
+    if (parcelasTotal > 1) metodo = 'CREDITO';
+
+    let categoria = isReceita ? 'Receita' : 'Outros';
+    if (/mercado|supermercado|atacadão|compras|açougue|hortifruti|cebola/i.test(txtLower)) categoria = 'Mercado';
+    else if (/lanche|restaurante|ifood|padaria|almoço|jantar|burger|pizza|café/i.test(txtLower)) categoria = 'Alimentação';
+    else if (/uber|gasolina|combustível|posto|99|estacionamento|pedágio/i.test(txtLower)) categoria = 'Transporte';
+    else if (/cinema|passeio|bar|viagem|streaming|netflix|jogo|shopping/i.test(txtLower)) categoria = 'Lazer';
+    else if (/luz|água|internet|energia|boleto|aluguel|condomínio/i.test(txtLower)) categoria = 'Contas';
+
+    for (const cat of categorias) {
+      if (txtLower.includes(cat.toLowerCase())) {
+        categoria = cat;
+        break;
+      }
+    }
+
+    let descricao = textoSemParcela
+      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|no cartão de credito|no cartão|no credito|no pix|no débito|credito|debito|pix|reais|r\$|de |em /gi, ' ')
+      .replace(matchValor[0], '')
+      .replace(cartaoIdentificado ? new RegExp(cartaoIdentificado, 'gi') : '', '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!descricao || descricao.length < 2) descricao = `${tipo === 'RECEITA' ? 'Entrada' : 'Gasto'} (${categoria})`;
+    descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
+
+    return {
+      descricao,
+      valorTotal,
+      valorParcela,
+      parcelasTotal,
+      tipo,
+      metodo,
+      cartao_nome: cartaoIdentificado,
+      categoria
+    };
+  };
+
   const handleEnviarWhatsApp = async (e) => {
     e.preventDefault();
     if (!msgWhats.trim() || !user) return;
@@ -284,46 +359,123 @@ export default function App() {
     setProcessando(true);
 
     try {
-      const isPergunta = /\?|quanto|qual|resumo|saldo|fatura/i.test(txtLower) && !/gastei|comprei|paguei|recebi/i.test(txtLower);
+      const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|posso gastar/i.test(txtLower) && !/gastei|comprei|paguei|recebi/i.test(txtLower);
 
       if (isPergunta) {
         const transMes = transacoes.filter(t => t.anoMes === filtroMesAno);
         const rec = transMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
         const desp = transMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
-        
+        const sld = rec - desp;
+
+        const cartaoPerguntado = cartoes.find(c => txtLower.includes(c.nome.toLowerCase()));
+        if (cartaoPerguntado) {
+          const totalCartao = transMes
+            .filter(t => t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase())
+            .reduce((a, b) => a + Number(b.valor || 0), 0);
+          const disp = cartaoPerguntado.limite - totalCartao;
+
+          setHistoricoChat(prev => [...prev, {
+            autor: 'bot',
+            texto: `💳 *Fatura ${cartaoPerguntado.nome} (${filtroMesAno})*\n\n` +
+                   `• Gasto no mês: *R$ ${totalCartao.toFixed(2)}*\n` +
+                   `• Limite disponível: *R$ ${disp.toFixed(2)}*`
+          }]);
+          setProcessando(false);
+          return;
+        }
+
         setHistoricoChat(prev => [...prev, {
           autor: 'bot',
-          texto: `📊 *Resumo (${filtroMesAno})*\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Saldo: R$ ${(rec - desp).toFixed(2)}*`
+          texto: `📊 *Resumo Inteligente (${filtroMesAno})*\n\n` +
+                 `🟢 Receitas: R$ ${rec.toFixed(2)}\n` +
+                 `🔴 Despesas: R$ ${desp.toFixed(2)}\n` +
+                 `💰 *Saldo Atual: R$ ${sld.toFixed(2)}*\n\n` +
+                 `💡 *Potencial de Aporte (20%):* R$ ${(rec * 0.2).toFixed(2)}`
         }]);
         setProcessando(false);
         return;
       }
 
-      const matchValor = textoUsuario.match(/(\d+[.,]\d{2}|\d+)/);
-      if (!matchValor) {
-        setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '❌ Não identifiquei o valor. Tente: "Gastei 50 no mercado"' }]);
+      // Converte números com vírgula (ex: 50,00 -> 50.00) antes de separar por vírgula
+      const textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
+      const partes = textoNormalizado
+        .split(/(?:,|\s+e\s+|\s*;\s*|\n+)/i)
+        .map(p => p.trim())
+        .filter(Boolean);
+
+      const itensExtraidos = partes.map(interpretarItemUnico).filter(Boolean);
+
+      if (itensExtraidos.length === 0) {
+        setHistoricoChat(prev => [...prev, { 
+          autor: 'bot', 
+          texto: '🤔 Não identifiquei valores. Tente:\n• "Gastei 45 na padaria no PIX"\n• "Qual meu saldo?"' 
+        }]);
         setProcessando(false);
         return;
       }
 
-      const valor = parseFloat(matchValor[0].replace(',', '.'));
-      const isReceita = /recebi|ganhei|salário|salario|venda/i.test(txtLower);
-      const tipo = isReceita ? 'RECEITA' : 'DESPESA';
-      const categoria = isReceita ? 'Receita' : (/mercado/i.test(txtLower) ? 'Mercado' : 'Outros');
-      const descricao = textoUsuario.replace(matchValor[0], '').replace(/gastei|comprei|paguei|no pix|no cartão|reais|r\$/gi, '').trim() || 'Gasto Geral';
-
       const hoje = new Date();
-      await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
-        descricao: descricao.charAt(0).toUpperCase() + descricao.slice(1),
-        valor,
-        tipo,
-        metodo: 'PIX/CARTÃO',
-        categoria,
-        anoMes: filtroMesAno,
-        criadoEm: serverTimestamp()
-      });
+      let resumoRespostas = [];
 
-      setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `✅ Lançado: ${descricao} - R$ ${valor.toFixed(2)}` }]);
+      for (const dados of itensExtraidos) {
+        if (dados.parcelasTotal > 1) {
+          for (let i = 0; i < dados.parcelasTotal; i++) {
+            const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
+            const anoM = dataParcela.getFullYear();
+            const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+
+            await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+              descricao: `${dados.descricao} (${i + 1}/${dados.parcelasTotal})`,
+              valor: dados.valorParcela,
+              tipo: dados.tipo,
+              metodo: dados.metodo,
+              cartao_nome: dados.cartao_nome,
+              categoria: dados.categoria,
+              parcela_atual: i + 1,
+              parcelas_total: dados.parcelasTotal,
+              anoMes: `${anoM}-${mesM}`,
+              mensagem_original: textoUsuario,
+              criadoEm: serverTimestamp()
+            });
+          }
+          resumoRespostas.push(`✅ *${dados.descricao}*: ${dados.parcelasTotal}x de R$ ${dados.valorParcela.toFixed(2)} (${dados.cartao_nome || 'Crédito'})`);
+        } else {
+          const anoM = hoje.getFullYear();
+          const mesM = String(hoje.getMonth() + 1).padStart(2, '0');
+          const anoMesAtual = `${anoM}-${mesM}`;
+
+          await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+            descricao: dados.descricao,
+            valor: dados.valorParcela,
+            tipo: dados.tipo,
+            metodo: dados.metodo,
+            cartao_nome: dados.cartao_nome,
+            categoria: dados.categoria,
+            anoMes: anoMesAtual,
+            mensagem_original: textoUsuario,
+            criadoEm: serverTimestamp()
+          });
+
+          let alertaOrc = '';
+          const limiteCat = orcamentos[dados.categoria];
+          if (limiteCat && dados.tipo === 'DESPESA') {
+            const gastoAcumulado = transacoes
+              .filter(t => t.anoMes === anoMesAtual && t.tipo === 'DESPESA' && t.categoria === dados.categoria)
+              .reduce((a, b) => a + Number(b.valor || 0), 0) + dados.valorParcela;
+            const pct = Math.round((gastoAcumulado / limiteCat) * 100);
+            if (pct >= 100) alertaOrc = `\n⚠️ *Alerta:* Você atingiu ${pct}% do limite de ${dados.categoria}!`;
+            else if (pct >= 80) alertaOrc = `\n👀 *Atenção:* ${pct}% do orçamento de ${dados.categoria} utilizado.`;
+          }
+
+          resumoRespostas.push(`✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} (${dados.cartao_nome || dados.metodo})${alertaOrc}`);
+        }
+      }
+
+      setHistoricoChat(prev => [...prev, { 
+        autor: 'bot', 
+        texto: resumoRespostas.join('\n\n')
+      }]);
+
     } catch (error) {
       console.error(error);
     } finally {
@@ -392,7 +544,7 @@ export default function App() {
     );
   }
 
-  // Cálculos do Dashboard
+  // 4. Cálculos Preditivos e Métricas do Dashboard
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
   const totalReceitas = transacoesFiltradas.filter(t => t.tipo === 'RECEITA').reduce((acc, t) => acc + Number(t.valor || 0), 0);
   const totalDespesas = transacoesFiltradas.filter(t => t.tipo === 'DESPESA').reduce((acc, t) => acc + Number(t.valor || 0), 0);
@@ -404,9 +556,16 @@ export default function App() {
   const diasDecorridos = isMesAtual ? Math.max(dataAtualObj.getDate(), 1) : totalDiasNoMes;
   const gastoMedioDiario = totalDespesas / diasDecorridos;
   const projecaoDespesasMes = isMesAtual ? gastoMedioDiario * totalDiasNoMes : totalDespesas;
+  const projecaoSaldoFimMes = totalReceitas - projecaoDespesasMes;
 
   const metaAporte = totalReceitas * 0.20;
   const taxaPoupancaAtual = totalReceitas > 0 ? Math.max(Math.round(((totalReceitas - totalDespesas) / totalReceitas) * 100), 0) : 0;
+
+  const dataProxMes = new Date(anoSel, mesSel, 1);
+  const proxMesStr = `${dataProxMes.getFullYear()}-${String(dataProxMes.getMonth() + 1).padStart(2, '0')}`;
+  const comprometidoProxMes = transacoes
+    .filter(t => t.anoMes === proxMesStr && t.tipo === 'DESPESA')
+    .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
   const despesasPorCategoria = categorias.map(cat => {
     const total = transacoesFiltradas
@@ -453,8 +612,11 @@ export default function App() {
             <button onClick={() => setAbaAtiva('cartoes')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'cartoes' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <CreditCard className="w-4 h-4" /> Meus Cartões
             </button>
-            <button onClick={() => setAbaAtiva('whatsapp')} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'whatsapp' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
-              <QrCode className="w-4 h-4" /> Conexão WhatsApp
+            <button onClick={() => setAbaAtiva('whatsapp')} className={`w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition ${abaAtiva === 'whatsapp' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+              <span className="flex items-center gap-3">
+                <QrCode className="w-4 h-4" /> Conexão WhatsApp
+              </span>
+              <span className={`w-2.5 h-2.5 rounded-full ${whatsappStatus === 'CONNECTED' ? 'bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-amber-400 animate-pulse'}`} title={whatsappStatus === 'CONNECTED' ? 'Conectado' : 'Desconectado'}></span>
             </button>
           </nav>
         </div>
@@ -474,6 +636,34 @@ export default function App() {
       <main className="flex-1 p-6 md:p-8 overflow-y-auto grid grid-cols-1 lg:grid-cols-3 gap-8 bg-slate-950">
         
         <div className="lg:col-span-2 space-y-6">
+
+          {/* BANNER DE ALERTA: WHATSAPP DESCONECTADO */}
+          {whatsappStatus !== 'CONNECTED' && (
+            <div className="bg-amber-500/10 border border-amber-500/30 p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xl">
+              <div className="flex items-center gap-3.5">
+                <div className="w-10 h-10 bg-amber-500/20 text-amber-400 rounded-xl flex items-center justify-center shrink-0 border border-amber-500/30">
+                  <AlertTriangle className="w-5 h-5 animate-bounce" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-amber-300 flex items-center gap-2">
+                    WhatsApp Desconectado
+                    <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full uppercase">Ação Necessária</span>
+                  </h4>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    O robô não conseguirá ler as mensagens do seu celular até você parear o QR Code.
+                  </p>
+                </div>
+              </div>
+              {abaAtiva !== 'whatsapp' && (
+                <button 
+                  onClick={() => setAbaAtiva('whatsapp')}
+                  className="w-full sm:w-auto bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs px-4 py-2.5 rounded-xl transition whitespace-nowrap shadow-lg shadow-amber-500/20"
+                >
+                  Conectar Agora
+                </button>
+              )}
+            </div>
+          )}
           
           {abaAtiva === 'dashboard' && (
             <>
@@ -513,7 +703,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* INTELIGÊNCIA PREDITIVA */}
+              {/* PAINEL DE INTELIGÊNCIA PREDITIVA E APORTES */}
               <div className="bg-gradient-to-br from-emerald-950/30 via-slate-900/80 to-slate-900/80 border border-emerald-500/20 p-5 rounded-2xl space-y-4 shadow-xl">
                 <div className="flex items-center justify-between">
                   <h2 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
@@ -524,17 +714,122 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Ritmo Diário (Burn Rate)</span>
                     <p className="text-lg font-bold text-slate-100 mt-1">R$ {gastoMedioDiario.toFixed(2)} <span className="text-xs font-normal text-slate-400">/dia</span></p>
-                    <p className="text-[11px] text-slate-400 mt-1.5">Projeção final: R$ {projecaoDespesasMes.toFixed(2)}</p>
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      Projeção até dia {totalDiasNoMes}: <strong className={projecaoSaldoFimMes >= 0 ? 'text-emerald-400' : 'text-rose-400'}>R$ {projecaoDespesasMes.toFixed(2)}</strong>
+                    </p>
                   </div>
+
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Potencial de Aporte (20%)</span>
                     <p className="text-lg font-bold text-emerald-400 mt-1">R$ {metaAporte.toFixed(2)}</p>
-                    <p className="text-[11px] text-slate-400 mt-1.5">Poupança atual: {taxaPoupancaAtual}%</p>
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      Taxa de poupança atual: <strong className="text-slate-200">{taxaPoupancaAtual}%</strong> da renda
+                    </p>
                   </div>
+
+                  <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
+                    <span className="text-[11px] text-slate-400 uppercase font-semibold">Faturas Mês Seguinte</span>
+                    <p className="text-lg font-bold text-amber-400 mt-1">R$ {comprometidoProxMes.toFixed(2)}</p>
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      Já comprometido em {proxMesStr}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* CHECKLIST DE CONTAS FIXAS NO DASHBOARD */}
+              {contasFixas.length > 0 && (
+                <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3.5 shadow-xl">
+                  <div className="flex justify-between items-center">
+                    <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-amber-400" /> Checklist de Contas Fixas ({filtroMesAno})
+                    </h2>
+                    <button onClick={() => setAbaAtiva('fixas')} className="text-xs text-emerald-400 hover:underline">
+                      + Configurar fixas
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {contasFixas.map(cf => {
+                      const jaPaga = transacoesFiltradas.some(
+                        t => t.conta_fixa_id === cf.id || t.descricao?.toLowerCase().includes(cf.nome.toLowerCase())
+                      );
+                      return (
+                        <div key={cf.id} className={`p-3.5 rounded-xl border flex items-center justify-between ${jaPaga ? 'bg-emerald-950/15 border-emerald-500/30' : 'bg-slate-950/70 border-slate-800'}`}>
+                          <div>
+                            <p className="text-sm font-medium text-slate-200">{cf.nome}</p>
+                            <p className="text-xs text-slate-400">Vence dia {cf.diaVencimento} • R$ {Number(cf.valorPadrao).toFixed(2)}</p>
+                          </div>
+                          {jaPaga ? (
+                            <span className="flex items-center gap-1 text-xs text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-1 rounded-lg">
+                              <CheckCircle2 className="w-3.5 h-3.5" /> Pago
+                            </span>
+                          ) : (
+                            <button 
+                              onClick={() => pagarContaFixaRapido(cf)}
+                              className="text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold px-3 py-1.5 rounded-lg transition flex items-center gap-1"
+                            >
+                              <Zap className="w-3 h-3" /> Dar Baixa
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* LIMITES E ALERTAS POR CATEGORIA */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
+                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                  <Target className="w-4 h-4 text-emerald-400" /> Limites por Categoria ({filtroMesAno})
+                </h2>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  {categorias.filter(cat => cat !== 'Receita').map(cat => {
+                    const gastoCat = transacoesFiltradas
+                      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat)
+                      .reduce((acc, t) => acc + Number(t.valor || 0), 0);
+                    
+                    const limite = orcamentos[cat] || 0;
+                    const ultrapassou = limite > 0 && gastoCat > limite;
+                    const porcentagem = limite > 0 ? Math.min(Math.round((gastoCat / limite) * 100), 100) : 0;
+
+                    return (
+                      <div key={cat} className={`p-4 rounded-xl border transition ${ultrapassou ? 'bg-rose-950/20 border-rose-500/40' : 'bg-slate-950/60 border-slate-800/80'}`}>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="font-medium text-sm text-slate-200">{cat}</span>
+                          {ultrapassou ? (
+                            <span className="flex items-center gap-1 text-[11px] text-rose-400 font-bold bg-rose-500/10 px-2.5 py-0.5 rounded-full border border-rose-500/20">
+                              <AlertTriangle className="w-3 h-3" /> Estourado!
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-slate-400 font-medium">
+                              {limite > 0 ? `Limite: R$ ${limite.toFixed(2)}` : 'Sem limite'}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex justify-between items-center text-xs mb-1.5">
+                          <span className="text-slate-400">Gasto: <strong className="text-slate-200">R$ {gastoCat.toFixed(2)}</strong></span>
+                          {limite > 0 && <span className="text-slate-400 font-medium">{porcentagem}%</span>}
+                        </div>
+
+                        {limite > 0 && (
+                          <div className="w-full bg-slate-800/80 h-2 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full transition-all duration-500 ${ultrapassou ? 'bg-rose-500' : 'bg-emerald-500'}`} 
+                              style={{ width: `${porcentagem}%` }}
+                            ></div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -619,7 +914,7 @@ export default function App() {
                 <input type="text" placeholder="Nome (ex: Aluguel)" value={fixaNome} onChange={e => setFixaNome(e.target.value)} className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
                 <input type="number" placeholder="Valor (R$)" value={fixaValor} onChange={e => setFixaValor(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
                 <input type="number" placeholder="Dia Venc." value={fixaDia} onChange={e => setFixaDia(e.target.value)} className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
-                <button type="submit" className="sm:col-span-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 py-3 rounded-xl font-semibold text-sm">+ Adicionar Conta</button>
+                <button type="submit" className="sm:col-span-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 py-3 rounded-xl font-semibold text-sm transition">+ Adicionar Conta Fixa</button>
               </form>
               <div className="space-y-2.5">
                 {contasFixas.map(cf => (
@@ -639,16 +934,41 @@ export default function App() {
             <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-6 shadow-xl">
               <div>
                 <h2 className="text-lg font-bold">Categorias & Orçamentos</h2>
-                <p className="text-xs text-slate-400 mt-0.5">Gerencie categorias e defina limites mensais.</p>
+                <p className="text-xs text-slate-400 mt-0.5">Gerencie categorias e defina limites mensais para receber alertas.</p>
               </div>
               <form onSubmit={adicionarCategoria} className="flex gap-3">
-                <input type="text" placeholder="Nome da Categoria" value={novaCatNome} onChange={e => setNovaCatNome(e.target.value)} className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
-                <button type="submit" className="bg-emerald-500 text-slate-950 px-5 py-3 rounded-xl font-semibold text-sm"><Plus className="w-4 h-4" /></button>
+                <input type="text" placeholder="Nome da Categoria (ex: Pet)" value={novaCatNome} onChange={e => setNovaCatNome(e.target.value)} className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
+                <button type="submit" className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-5 py-3 rounded-xl font-semibold text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Adicionar</button>
               </form>
+
+              <form onSubmit={definirOrcamento} className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-slate-800/80">
+                <select 
+                  value={orcamentoCat} onChange={e => setOrcamentoCat(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200"
+                >
+                  <option value="">Selecione para definir limite</option>
+                  {categorias.filter(c => c !== 'Receita').map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+                <input 
+                  type="number" placeholder="Limite (R$)" value={orcamentoValor} onChange={e => setOrcamentoValor(e.target.value)} 
+                  className="w-full sm:w-44 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" 
+                />
+                <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-3 rounded-xl font-semibold text-sm transition">
+                  Salvar Limite
+                </button>
+              </form>
+
               <div className="space-y-2.5">
                 {categorias.map(cat => (
                   <div key={cat} className="flex items-center justify-between bg-slate-950/60 border border-slate-800 px-4 py-3.5 rounded-xl text-sm">
-                    <span className="font-medium text-slate-200">{cat}</span>
+                    <div>
+                      <span className="font-medium text-slate-200">{cat}</span>
+                      <span className="text-xs text-slate-400 ml-3">
+                        {orcamentos[cat] ? `Limite: R$ ${orcamentos[cat].toFixed(2)}` : 'Sem limite definido'}
+                      </span>
+                    </div>
                     <button onClick={() => excluirCategoria(cat)} className="text-slate-600 hover:text-rose-400"><Trash2 className="w-4 h-4" /></button>
                   </div>
                 ))}
@@ -708,7 +1028,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-4 py-6">
-                    <p className="text-xs text-slate-400">Nenhum QR Code gerado no momento.</p>
+                    <p className="text-xs text-slate-400">Nenhum QR Code ativo no momento.</p>
                     <button 
                       onClick={solicitarConexaoWhatsApp} 
                       disabled={carregandoQr}
@@ -733,7 +1053,7 @@ export default function App() {
             </div>
             <div>
               <h3 className="font-bold text-sm text-emerald-300">Simulador do WhatsApp</h3>
-              <p className="text-xs text-emerald-500/80 font-medium">Testes em tempo real</p>
+              <p className="text-xs text-emerald-500/80 font-medium">Lançamento Múltiplo & Consultas</p>
             </div>
           </div>
 
@@ -753,7 +1073,7 @@ export default function App() {
           </div>
 
           <div className="p-2.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2 overflow-x-auto">
-            <button type="button" onClick={() => setMsgWhats('Gastei 150 no mercado')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">⚡ "mercado 150"</button>
+            <button type="button" onClick={() => setMsgWhats('Shopping, 50,00 de estacionamento no pix, 100,00 no cinema credito')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">⚡ Múltiplo</button>
             <button type="button" onClick={() => setMsgWhats('Qual meu saldo?')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">📊 "Qual meu saldo?"</button>
           </div>
 
