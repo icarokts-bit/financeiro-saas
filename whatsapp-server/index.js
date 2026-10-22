@@ -25,7 +25,6 @@ app.use(express.json());
 const sessions = new Map();
 const userJids = new Map();
 
-// Remove acentos para facilitar comparações ("alimentação" == "alimentacao")
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
 
 const formatarDataBR = (isoDate) => {
@@ -40,13 +39,11 @@ app.get('/', (req, res) => {
   res.status(200).send('OK');
 });
 
-// Rota para forçar o teste de alertas de vencimento pelo botão do Painel
 app.get('/verificar-alertas', async (req, res) => {
   await verificarAlertasVencimento(true);
   res.status(200).send('OK - Alertas verificados');
 });
 
-// Rota para gerar novo QR Code
 app.post('/conectar', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
@@ -74,7 +71,6 @@ app.post('/conectar', async (req, res) => {
   }
 });
 
-// Rota para desconectar aparelho
 app.post('/desconectar', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
@@ -169,7 +165,7 @@ async function useFirestoreAuthState(userId) {
 }
 
 // ============================================================================
-// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP
+// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM BLOQUEIO DE CONVERSAS DE TERCEIROS)
 // ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
@@ -232,6 +228,20 @@ async function startWhatsAppForUser(userId) {
       const msg = messages[0];
       if (!msg.message || !msg.key.fromMe) return;
 
+      const remoteJid = msg.key.remoteJid || '';
+
+      // 🛑 MELHORIA 7: BLOQUEIO ESTRITO PARA NÃO RESPONDER CONVERSAS COM OUTRAS PESSOAS
+      // Ignora grupos, listas de transmissão e canais
+      if (remoteJid.endsWith('@g.us') || remoteJid.includes('broadcast') || remoteJid.includes('newsletter')) return;
+
+      const meuNumero = sock.user?.id ? sock.user.id.split(':')[0].split('@')[0] : '';
+      const meuLid = sock.user?.lid ? sock.user.lid.split(':')[0].split('@')[0] : '';
+      const destinoNumero = remoteJid.split(':')[0].split('@')[0];
+
+      // Só aceita se o chat de destino for o próprio número do dono ou seu próprio LID ("Mensagem para você mesmo")
+      const isChatProprio = (meuNumero && destinoNumero === meuNumero) || (meuLid && destinoNumero === meuLid);
+      if (!isChatProprio) return;
+
       const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
       if (!texto) return;
 
@@ -250,11 +260,13 @@ async function startWhatsAppForUser(userId) {
         texto.startsWith('🚨') ||
         texto.startsWith('📅') ||
         texto.startsWith('⏳') ||
-        texto.startsWith('🏦')
+        texto.startsWith('🏦') ||
+        texto.startsWith('🔄') ||
+        texto.startsWith('🟢')
       ) return;
 
-      userJids.set(userId, msg.key.remoteJid);
-      await processarMensagemInteligente(userId, texto, sock, msg.key.remoteJid);
+      userJids.set(userId, remoteJid);
+      await processarMensagemInteligente(userId, texto, sock, remoteJid);
     });
 
   } catch (err) {
@@ -300,7 +312,6 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 
       let avisos = [];
 
-      // 1. Verifica Contas Fixas Recorrentes que vencem no dia de hoje
       for (const cf of contasFixas) {
         if (Number(cf.diaVencimento) === diaHoje) {
           const jaPaga = transMes.some(
@@ -312,7 +323,6 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
         }
       }
 
-      // 2. Verifica Contas Agendadas (A Vencer / A Receber) que vencem exatamente hoje e estão em aberto
       const agendadasHoje = transMes.filter(
         t => t.pago === false && t.data_vencimento === dataHojeStr
       );
@@ -320,7 +330,6 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
         avisos.push(`• *${ag.descricao}* (${ag.tipo === 'RECEITA' ? 'A Receber' : 'A Pagar'}) — R$ ${Number(ag.valor || 0).toFixed(2)}`);
       }
 
-      // 3. Verifica Faturas de Cartão de Crédito que vencem hoje
       for (const c of cartoes) {
         if (Number(c.diaVencimento) === diaHoje) {
           const faturaMes = transMes
@@ -337,7 +346,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
           text: `🔔 *Alerta de Vencimento Hoje (${formatarDataBR(dataHojeStr)})*\n\n` +
                 `Você possui os seguintes compromissos vencendo hoje:\n` +
                 `${avisos.join('\n')}\n\n` +
-                `💡 _Acesse a aba "A Vencer & Receber" ou "Cartões" no painel para dar baixa._`
+                `💡 _Você pode dar baixa enviando "paguei [nome da conta] no pix" aqui no WhatsApp!_`
         });
       } else if (forcarDisparoManual) {
         await sock.sendMessage(remoteJid, {
@@ -355,14 +364,13 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 setInterval(() => verificarAlertasVencimento(false), 30 * 60 * 1000);
 
 // ============================================================================
-// 5. EXTRAÇÃO INTELIGENTE DE DATA DE VENCIMENTO (Ex: "vence 25/10", "dia 15")
+// 5. EXTRAÇÃO INTELIGENTE DE DATA E DE CATEGORIA + SUBCATEGORIA (MELHORIA 9)
 // ============================================================================
 function extrairDataVencimento(texto) {
   const hoje = new Date();
   const anoAtual = hoje.getFullYear();
   const mesAtual = hoje.getMonth() + 1;
 
-  // Formato DD/MM/YYYY ou DD/MM ou DD-MM
   const matchData = texto.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
   if (matchData) {
     const dia = String(matchData[1]).padStart(2, '0');
@@ -376,7 +384,6 @@ function extrairDataVencimento(texto) {
     };
   }
 
-  // Formato "vence dia 25" ou "vencimento 25"
   const matchDia = texto.match(/(?:vence|vencimento|vencer|dia)\s*(?:dia)?\s*(\d{1,2})\b/i);
   if (matchDia) {
     const dia = String(matchDia[1]).padStart(2, '0');
@@ -391,10 +398,74 @@ function extrairDataVencimento(texto) {
   return null;
 }
 
+function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategoriasMap = {}) {
+  if (isReceita) {
+    if (/salario|pagamento|pro-labore|adiantamento/i.test(pLimpo)) {
+      return { categoria: 'Receita', subcategoria: 'Salário', reconhecida: true };
+    }
+    return { categoria: 'Receita', subcategoria: 'Vendas / Extras', reconhecida: true };
+  }
+
+  // 1. Alimentação > Mercado (Hortifruti, Supermercado, Feira, Carnes, Grãos)
+  if (/mercado|supermercado|atacadao|assai|tenda|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|peixe|ovo|leite|pao|queijo|presunto|manteiga|oleo|azeite|acucar|sal|sabao|detergente|papel higienico/i.test(pLimpo)) {
+    return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
+  }
+
+  // 2. Alimentação > Lazer (Lanches, Restaurantes, Delivery, Cafés, Bares)
+  if (/lanche|hamburguer|burger|pizza|pizzaria|restaurante|ifood|padaria|almoco|jantar|cafe|sorvete|acai|pastel|salgado|churrasco|barzinho|bebida|cerveja|refrigerante|suco|doceria|bolo|chocolate/i.test(pLimpo)) {
+    return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
+  }
+
+  // 3. Transporte (Combustível, Apps, Estacionamento, Manutenção)
+  if (/uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio/i.test(pLimpo)) {
+    return { categoria: 'Transporte', subcategoria: 'Apps / Pedágio', reconhecida: true };
+  }
+  if (/gasolina|etanol|alcool|diesel|combustivel|posto|abastecimento/i.test(pLimpo)) {
+    return { categoria: 'Transporte', subcategoria: 'Combustível', reconhecida: true };
+  }
+  if (/mecanico|oficina|oleo do motor|pneu|ipva|licenciamento|seguro auto|lavagem/i.test(pLimpo)) {
+    return { categoria: 'Transporte', subcategoria: 'Manutenção / Veículo', reconhecida: true };
+  }
+
+  // 4. Lazer (Passeios, Cinema, Assinaturas, Viagens)
+  if (/cinema|passeio|parque|show|ingresso|viagem|hotel|pousada|shopping|jogo|game|brinquedo/i.test(pLimpo)) {
+    return { categoria: 'Lazer', subcategoria: 'Passeios', reconhecida: true };
+  }
+  if (/netflix|spotify|prime|disney|hbo|youtube|streaming|assinatura/i.test(pLimpo)) {
+    return { categoria: 'Lazer', subcategoria: 'Streaming', reconhecida: true };
+  }
+
+  // 5. Contas (Casa, Utilidades, Educação, Saúde)
+  if (/luz|energia|agua|sabesp|gas|internet|wifi|telefone|celular|vivo|claro|tim|aluguel|condominio|iptu|boleto|imposto|mei|das|contador|escola|faculdade|curso|farmacia|remedio|medico|consulta|exame|dentista/i.test(pLimpo)) {
+    if (/luz|energia|agua|gas|internet|telefone|celular|aluguel|condominio|iptu/i.test(pLimpo)) {
+      return { categoria: 'Contas', subcategoria: 'Casa / Fixas', reconhecida: true };
+    }
+    if (/farmacia|remedio|medico|consulta|exame|dentista/i.test(pLimpo)) {
+      return { categoria: 'Contas', subcategoria: 'Saúde / Farmácia', reconhecida: true };
+    }
+    return { categoria: 'Contas', subcategoria: 'Boletos / Serviços', reconhecida: true };
+  }
+
+  // 6. Verifica se o usuário escreveu explicitamente o nome de uma subcategoria ou categoria cadastrada
+  for (const cat of categorias) {
+    const subs = subcategoriasMap[cat] || [];
+    for (const sub of subs) {
+      if (pLimpo.includes(semAcento(sub))) {
+        return { categoria: cat, subcategoria: sub, reconhecida: true };
+      }
+    }
+    if (pLimpo.includes(semAcento(cat))) {
+      return { categoria: cat, subcategoria: subs[0] || 'Geral', reconhecida: true };
+    }
+  }
+
+  return { categoria: null, subcategoria: null, reconhecida: false };
+}
+
 // ============================================================================
-// 6. GRAVAÇÃO NO FIRESTORE + DISPARO DE ALERTAS DE LIMITE DE CARTÃO E CATEGORIA
+// 6. GRAVAÇÃO NO FIRESTORE + ALERTAS DE CARTÃO E CHEQUE ESPECIAL (MELHORIA 3)
 // ============================================================================
-async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadrao, textoOriginal) {
+async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
   const hoje = new Date();
   const hojeStr = hoje.toISOString().split('T')[0];
   let respostas = [];
@@ -406,6 +477,8 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadr
     const parcelasTotal = item.parcelasTotal || 1;
     const valorParcela = item.valorParcela;
     const isAgendado = item.pago === false;
+    const catFinal = item.categoria || 'Outros';
+    const subFinal = item.subcategoria || 'Geral';
 
     for (let i = 0; i < parcelasTotal; i++) {
       let anoMesItem = item.anoMes || anoMesPadrao;
@@ -419,14 +492,15 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadr
         dataVencItem = `${anoM}-${mesM}-15`;
       }
 
-      await db.collection('users').doc(userId).collection('transacoes').add({
+      const novoDoc = {
         descricao: parcelasTotal > 1 ? `${item.descricao} (${i + 1}/${parcelasTotal})` : item.descricao,
         valor: valorParcela,
         tipo: item.tipo,
         metodo: item.metodo || 'A DEFINIR',
         cartao_nome: item.cartao_nome || null,
         banco_nome: item.banco_nome || null,
-        categoria: item.categoria,
+        categoria: catFinal,
+        subcategoria: subFinal,
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
         fatura_paga: false,
@@ -436,13 +510,16 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadr
         origem: 'WHATSAPP_IA',
         mensagem_original: textoOriginal,
         criadoEm: admin.firestore.FieldValue.serverTimestamp()
-      });
+      };
+
+      await db.collection('users').doc(userId).collection('transacoes').add(novoDoc);
+      todasTransacoes.push(novoDoc);
     }
 
     if (isAgendado) {
       respostas.push(
         `📅 *Conta Lançada (${item.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n` +
-        `• *${item.descricao}* [${item.categoria}]\n` +
+        `• *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
         `• Valor: *R$ ${valorParcela.toFixed(2)}*\n` +
         `• Vencimento: *${formatarDataBR(item.data_vencimento)}* (Status: Em Aberto)`
       );
@@ -452,26 +529,26 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadr
     let alertasExtras = '';
 
     // 1. Alerta de Limite de Categoria
-    const limiteCat = Number(orcamentos[item.categoria] || 0);
+    const limiteCat = Number(orcamentos[catFinal] || 0);
     if (limiteCat > 0 && item.tipo === 'DESPESA') {
       const gastoCatMes = todasTransacoes
-        .filter(t => t.anoMes === anoMesPadrao && t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(item.categoria))
-        .reduce((a, b) => a + Number(b.valor || 0), 0) + valorParcela;
+        .filter(t => t.anoMes === anoMesPadrao && t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(catFinal) && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
+        .reduce((a, b) => a + Number(b.valor || 0), 0);
       const pctCat = Math.round((gastoCatMes / limiteCat) * 100);
       if (pctCat >= 100) {
-        alertasExtras += `\n🚨 *Limite da Categoria ${item.categoria} Estourado!* (${pctCat}% usado)`;
+        alertasExtras += `\n🚨 *Limite da Categoria ${catFinal} Estourado!* (${pctCat}% usado)`;
       } else if (pctCat >= 80) {
-        alertasExtras += `\n⚠️ *Atenção:* Categoria ${item.categoria} chegou a ${pctCat}% do limite.`;
+        alertasExtras += `\n⚠️ *Atenção:* Categoria ${catFinal} chegou a ${pctCat}% do limite.`;
       }
     }
 
-    // 2. Alerta de Limite do Cartão de Crédito (deduzindo compras e parcelas futuras)
+    // 2. Alerta de Limite do Cartão de Crédito
     if (item.metodo === 'CREDITO' && item.cartao_nome) {
       const objCartao = cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome));
       if (objCartao && Number(objCartao.limite) > 0) {
         const gastoAcumuladoCartao = todasTransacoes
           .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(objCartao.nome) && !t.fatura_paga && t.anoMes >= anoMesPadrao)
-          .reduce((a, b) => a + Number(b.valor || 0), 0) + (valorParcela * parcelasTotal);
+          .reduce((a, b) => a + Number(b.valor || 0), 0);
 
         const limiteTotal = Number(objCartao.limite);
         const disponivel = limiteTotal - gastoAcumuladoCartao;
@@ -487,9 +564,36 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadr
       }
     }
 
+    // 3. MELHORIA 3: Alerta de Uso do Cheque Especial (Saldo Negativo na Conta Bancária)
+    if (item.metodo !== 'CREDITO' && item.banco_nome) {
+      const idxBanco = bancos.findIndex(b => semAcento(b.nome) === semAcento(item.banco_nome));
+      if (idxBanco !== -1) {
+        const bObj = bancos[idxBanco];
+        const entB = todasTransacoes
+          .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (semAcento(t.banco_nome) === semAcento(bObj.nome) || (!t.banco_nome && idxBanco === 0)))
+          .reduce((a, x) => a + Number(x.valor || 0), 0);
+        const saiB = todasTransacoes
+          .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO' && (semAcento(t.banco_nome) === semAcento(bObj.nome) || (!t.banco_nome && idxBanco === 0)))
+          .reduce((a, x) => a + Number(x.valor || 0), 0);
+        const saldoAtualBanco = Number(bObj.saldoInicial || 0) + entB - saiB;
+
+        if (saldoAtualBanco < 0) {
+          alertasExtras += `\n🚨 *ALERTA DE CHEQUE ESPECIAL:* A conta *${bObj.nome}* entrou no negativo! Saldo atual: *R$ ${saldoAtualBanco.toFixed(2)}*`;
+        } else {
+          alertasExtras += `\n🏦 _Saldo restante no ${bObj.nome}: R$ ${saldoAtualBanco.toFixed(2)}_`;
+        }
+      }
+    }
+
+    const origemPagamento = item.metodo === 'CREDITO'
+      ? `Cartão ${item.cartao_nome}`
+      : item.banco_nome
+        ? `${item.metodo} (${item.banco_nome})`
+        : item.metodo;
+
     respostas.push(
-      `✅ *${item.descricao}* [${item.categoria}]\n` +
-      `💰 R$ ${valorParcela.toFixed(2)} ${parcelasTotal > 1 ? `(${parcelasTotal}x de R$ ${valorParcela.toFixed(2)})` : ''} • ${item.cartao_nome || item.banco_nome || item.metodo}${alertasExtras}`
+      `✅ *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
+      `💰 R$ ${valorParcela.toFixed(2)} ${parcelasTotal > 1 ? `(${parcelasTotal}x de R$ ${valorParcela.toFixed(2)})` : ''} • ${origemPagamento}${alertasExtras}`
     );
   }
 
@@ -497,7 +601,90 @@ async function gravarItensNoBanco(userId, itens, cartoes, orcamentos, anoMesPadr
 }
 
 // ============================================================================
-// 7. MOTOR DE INTELIGÊNCIA FINANCEIRA (PENDÊNCIAS, VENCIMENTOS, SALDOS E GASTOS)
+// 7. FUNÇÃO AUXILIAR PARA VERIFICAR SE FALTA FORMA DE PAGAMENTO, BANCO OU CATEGORIA
+// ============================================================================
+async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
+  const userRef = db.collection('users').doc(userId);
+
+  const prontos = [];
+  const pendentes = [];
+
+  for (const item of itens) {
+    const precisaMetodo = !item.metodo && item.pago !== false;
+    const precisaBanco = (item.metodo === 'PIX' || item.metodo === 'DEBITO') && !item.banco_nome && item.pago !== false;
+    const precisaCategoria = !item.categoria || item.precisaPerguntarCategoria;
+
+    if (!precisaMetodo && !precisaBanco && !precisaCategoria) {
+      prontos.push(item);
+    } else {
+      pendentes.push(item);
+    }
+  }
+
+  let msgs = [];
+
+  if (prontos.length > 0) {
+    const resps = await gravarItensNoBanco(userId, prontos, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal);
+    msgs.push(...resps);
+  }
+
+  if (pendentes.length > 0) {
+    const primeiro = pendentes[0];
+    let etapa = 'METODO';
+    let textoPergunta = '';
+
+    const resumoPendentes = pendentes
+      .map(i => `• *${i.descricao}* — R$ ${i.valorTotal.toFixed(2)}`)
+      .join('\n');
+
+    if (!primeiro.metodo && primeiro.pago !== false) {
+      etapa = 'METODO';
+      const opcoesCartoes = cartoes.map(c => c.nome).join(', ');
+      const opcoesBancos = bancos.map(b => b.nome).join(', ');
+      textoPergunta =
+        `❓ *Qual foi a forma de pagamento?*\n${resumoPendentes}\n\n` +
+        `Responda com:\n` +
+        `• *Pix* ou *Débito* (ex: _"Pix ${bancos[0]?.nome || 'Itaú'}"_)\n` +
+        `• *Cartão de Crédito* (*${opcoesCartoes}*)\n` +
+        `• *Dinheiro*\n` +
+        `_(Contas cadastradas: ${opcoesBancos})_`;
+    } else if ((primeiro.metodo === 'PIX' || primeiro.metodo === 'DEBITO') && !primeiro.banco_nome && primeiro.pago !== false) {
+      etapa = 'BANCO';
+      const opcoesBancos = bancos.map(b => b.nome).join(' ou ');
+      textoPergunta =
+        `🏦 *De qual conta bancária vai sair esse ${primeiro.metodo}?*\n${resumoPendentes}\n\n` +
+        `Responda com o nome do banco: *${opcoesBancos}*`;
+    } else {
+      etapa = 'CATEGORIA';
+      textoPergunta =
+        `📂 *Em qual Categoria e Subcategoria deseja lançar?*\n${resumoPendentes}\n\n` +
+        `Exemplos de resposta:\n` +
+        `• *Mercado* (vai para Alimentação > Mercado)\n` +
+        `• *Lazer* (vai para Alimentação > Lazer)\n` +
+        `• *Transporte*, *Contas* ou *Categoria > Subcategoria*`;
+    }
+
+    await userRef.set({
+      pendente_pagamento: {
+        etapa,
+        itens: pendentes,
+        textoOriginal,
+        criadoEm: Date.now()
+      }
+    }, { merge: true });
+
+    msgs.push(textoPergunta);
+  } else {
+    await userRef.set({ pendente_pagamento: null }, { merge: true });
+  }
+
+  if (msgs.length > 0) {
+    await sock.sendMessage(remoteJid, { text: msgs.join('\n\n') });
+  }
+}
+
+// ============================================================================
+// 8. MOTOR DE INTELIGÊNCIA FINANCEIRA COMPLETO
 // ============================================================================
 async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
   try {
@@ -509,10 +696,19 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17 }
     ];
     const bancos = userData.bancos || [
-      { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 0 },
-      { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 0 }
+      { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 1500 },
+      { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
     ];
-    const categorias = userData.categorias || ['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros'];
+    const categorias = userData.categorias || ['Alimentação', 'Mercado', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros'];
+    const subcategorias = userData.subcategorias || {
+      'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Delivery'],
+      'Mercado': ['Supermercado', 'Hortifruti', 'Açougue'],
+      'Transporte': ['Combustível', 'Apps / Pedágio', 'Manutenção'],
+      'Lazer': ['Passeios', 'Streaming', 'Viagens'],
+      'Contas': ['Casa / Fixas', 'Saúde / Farmácia', 'Boletos / Serviços'],
+      'Receita': ['Salário', 'Vendas / Extras'],
+      'Outros': ['Geral']
+    };
     const orcamentos = userData.orcamentos || {};
     const pendente = userData.pendente_pagamento || null;
 
@@ -522,75 +718,384 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const hojeStr = hoje.toISOString().split('T')[0];
 
     // ------------------------------------------------------------------------
-    // MODO -1: RESPOSTA À PERGUNTA DE FORMA DE PAGAMENTO PENDENTE
+    // MELHORIA 6: COMANDO "TESTE" PARA VERIFICAR SE A CONEXÃO ESTÁ OK
     // ------------------------------------------------------------------------
-    if (pendente && Array.isArray(pendente.itens) && pendente.itens.length > 0) {
+    if (/^(teste|testar|ping|status|conexao|ta funcionando|esta funcionando)$/i.test(txtLimpo)) {
+      await sock.sendMessage(remoteJid, {
+        text: `🟢 *Conexão FinZap 100% Online!*\n\n` +
+              `• Status do Bot: *Conectado e Operacional*\n` +
+              `• Banco de Dados: *Sincronizado*\n` +
+              `• Competência Ativa: *${anoMesAtual}*\n` +
+              `• Proteção de Chat: *Ativa (responde apenas no seu número)*`
+      });
+      return;
+    }
+
+    // ------------------------------------------------------------------------
+    // MODO -1: TRATAMENTO DE RESPOSTAS PENDENTES (PAGAMENTO, BANCO, CATEGORIA OU FATURA)
+    // ------------------------------------------------------------------------
+    if (pendente) {
       if (/^(cancelar|esquecer|nao|abortar)$/i.test(txtLimpo)) {
         await userRef.set({ pendente_pagamento: null }, { merge: true });
-        await sock.sendMessage(remoteJid, { text: '🗑️ Lançamento pendente cancelado.' });
+        await sock.sendMessage(remoteJid, { text: '🗑️ Operação pendente cancelada.' });
         return;
       }
 
-      let metodoEscolhido = null;
-      let cartaoEscolhido = null;
-      let bancoEscolhido = bancos[0]?.nome || null;
+      // Caso especial: Pendente de escolher qual banco vai pagar uma FATURA ou CONTA EM ABERTO
+      if (pendente.etapa === 'BAIXA_CONTA_BANCO' || pendente.etapa === 'PAGAR_FATURA_BANCO') {
+        const bancoEscolhido = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos[0];
+        if (bancoEscolhido) {
+          if (pendente.etapa === 'PAGAR_FATURA_BANCO') {
+            const { cartaoNome, valorFatura } = pendente;
+            const snapFatura = await db.collection('users').doc(userId).collection('transacoes')
+              .where('anoMes', '==', anoMesAtual)
+              .get();
 
-      for (const c of cartoes) {
-        if (txtLimpo.includes(semAcento(c.nome))) {
-          metodoEscolhido = 'CREDITO';
-          cartaoEscolhido = c.nome;
-          break;
-        }
-      }
+            const batch = db.batch();
+            snapFatura.docs.forEach(d => {
+              const dt = d.data();
+              if (dt.tipo === 'DESPESA' && semAcento(dt.cartao_nome) === semAcento(cartaoNome) && !dt.fatura_paga) {
+                batch.update(d.ref, { fatura_paga: true });
+              }
+            });
+            await batch.commit();
 
-      for (const b of bancos) {
-        if (txtLimpo.includes(semAcento(b.nome))) {
-          bancoEscolhido = b.nome;
-          if (!metodoEscolhido) {
-            metodoEscolhido = /pix/i.test(txtLimpo) ? 'PIX' : 'DEBITO';
+            await db.collection('users').doc(userId).collection('transacoes').add({
+              descricao: `Pagamento Fatura Cartão ${cartaoNome}`,
+              valor: Number(valorFatura),
+              tipo: 'DESPESA',
+              metodo: 'PAGAMENTO_FATURA',
+              cartao_nome: null,
+              banco_nome: bancoEscolhido.nome,
+              categoria: 'Contas',
+              subcategoria: 'Fatura Cartão',
+              pago: true,
+              data_vencimento: hojeStr,
+              anoMes: anoMesAtual,
+              origem: 'WHATSAPP_IA',
+              criadoEm: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            await userRef.set({ pendente_pagamento: null }, { merge: true });
+            await sock.sendMessage(remoteJid, {
+              text: `✅ *Fatura do cartão ${cartaoNome} paga com sucesso!*\n` +
+                    `💰 Valor: *R$ ${Number(valorFatura).toFixed(2)}*\n` +
+                    `🏦 Debitado da conta: *${bancoEscolhido.nome}*\n` +
+                    `📊 _O pagamento já consta no seu Extrato de Movimentação e o limite foi liberado._`
+            });
+            return;
           }
-          break;
+
+          if (pendente.etapa === 'BAIXA_CONTA_BANCO') {
+            const { docId, descricao, valor, metodo } = pendente;
+            await db.collection('users').doc(userId).collection('transacoes').doc(docId).update({
+              pago: true,
+              metodo: metodo || 'PIX',
+              banco_nome: bancoEscolhido.nome,
+              data_pagamento: hojeStr
+            });
+            await userRef.set({ pendente_pagamento: null }, { merge: true });
+            await sock.sendMessage(remoteJid, {
+              text: `✅ *Baixa de Conta Efetivada!*\n` +
+                    `• Conta: *${descricao}*\n` +
+                    `• Valor: *R$ ${Number(valor).toFixed(2)}*\n` +
+                    `• Debitado de: *${bancoEscolhido.nome}* (${metodo || 'PIX'})`
+            });
+            return;
+          }
         }
       }
 
-      if (!metodoEscolhido) {
-        if (/credito|cartao/i.test(txtLimpo)) {
-          metodoEscolhido = 'CREDITO';
-          cartaoEscolhido = cartoes[0]?.nome || 'CREDITO';
-        } else if (/debito/i.test(txtLimpo)) {
-          metodoEscolhido = 'DEBITO';
-        } else if (/pix/i.test(txtLimpo)) {
-          metodoEscolhido = 'PIX';
-        } else if (/dinheiro|especie/i.test(txtLimpo)) {
-          metodoEscolhido = 'DINHEIRO';
-        }
-      }
+      // Fluxo de itens de gastos pendentes (METODO -> BANCO -> CATEGORIA)
+      if (Array.isArray(pendente.itens) && pendente.itens.length > 0) {
+        let itensAtualizados = [...pendente.itens];
 
-      if (metodoEscolhido) {
-        const matchParcelasResp = txtLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
-        const parcelasResp = matchParcelasResp ? parseInt(matchParcelasResp[1]) : null;
+        if (pendente.etapa === 'METODO') {
+          let metodoEscolhido = null;
+          let cartaoEscolhido = null;
+          let bancoEscolhido = null;
 
-        const itensFinalizados = pendente.itens.map(it => {
-          const pTotal = parcelasResp || it.parcelasTotal || 1;
-          const vParc = pTotal > 1 ? Number((it.valorTotal / pTotal).toFixed(2)) : it.valorTotal;
-          return {
+          for (const c of cartoes) {
+            if (txtLimpo.includes(semAcento(c.nome))) {
+              metodoEscolhido = 'CREDITO';
+              cartaoEscolhido = c.nome;
+              break;
+            }
+          }
+
+          for (const b of bancos) {
+            if (txtLimpo.includes(semAcento(b.nome))) {
+              bancoEscolhido = b.nome;
+              if (!metodoEscolhido) {
+                metodoEscolhido = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
+              }
+              break;
+            }
+          }
+
+          if (!metodoEscolhido) {
+            if (/credito|cartao/i.test(txtLimpo)) {
+              metodoEscolhido = 'CREDITO';
+              cartaoEscolhido = cartoes[0]?.nome || 'CREDITO';
+            } else if (/debito/i.test(txtLimpo)) {
+              metodoEscolhido = 'DEBITO';
+            } else if (/pix/i.test(txtLimpo)) {
+              metodoEscolhido = 'PIX';
+            } else if (/dinheiro|especie/i.test(txtLimpo)) {
+              metodoEscolhido = 'DINHEIRO';
+            }
+          }
+
+          if (metodoEscolhido) {
+            const matchParcelasResp = txtLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+            const parcelasResp = matchParcelasResp ? parseInt(matchParcelasResp[1]) : null;
+
+            itensAtualizados = itensAtualizados.map(it => {
+              const pTotal = parcelasResp || it.parcelasTotal || 1;
+              const vParc = pTotal > 1 ? Number((it.valorTotal / pTotal).toFixed(2)) : it.valorTotal;
+              return {
+                ...it,
+                parcelasTotal: pTotal,
+                valorParcela: vParc,
+                metodo: metodoEscolhido,
+                cartao_nome: cartaoEscolhido,
+                banco_nome: metodoEscolhido === 'CREDITO' ? null : (bancoEscolhido || it.banco_nome),
+                pago: true
+              };
+            });
+
+            await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
+            return;
+          }
+        } else if (pendente.etapa === 'BANCO') {
+          const bancoObj = bancos.find(b => txtLimpo.includes(semAcento(b.nome)));
+          if (bancoObj) {
+            itensAtualizados = itensAtualizados.map(it => ({
+              ...it,
+              banco_nome: bancoObj.nome
+            }));
+            await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
+            return;
+          }
+        } else if (pendente.etapa === 'CATEGORIA') {
+          const classif = classificarCategoriaESubcategoria(txtLimpo, false, categorias, subcategorias);
+          let catResp = classif.categoria;
+          let subResp = classif.subcategoria;
+
+          if (!catResp) {
+            if (textoUsuario.includes('>')) {
+              const [c, s] = textoUsuario.split('>').map(x => x.trim());
+              catResp = c;
+              subResp = s || 'Geral';
+            } else {
+              catResp = textoUsuario.trim();
+              subResp = 'Geral';
+            }
+          }
+
+          itensAtualizados = itensAtualizados.map(it => ({
             ...it,
-            parcelasTotal: pTotal,
-            valorParcela: vParc,
-            metodo: metodoEscolhido,
-            cartao_nome: cartaoEscolhido,
-            banco_nome: metodoEscolhido === 'CREDITO' ? null : bancoEscolhido,
-            pago: true
-          };
-        });
+            categoria: catResp,
+            subcategoria: subResp,
+            precisaPerguntarCategoria: false
+          }));
+
+          await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
+          return;
+        }
 
         await userRef.set({ pendente_pagamento: null }, { merge: true });
-        const respostas = await gravarItensNoBanco(userId, itensFinalizados, cartoes, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`);
-        await sock.sendMessage(remoteJid, { text: respostas.join('\n\n') });
-        return;
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // MELHORIA 1: TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS PELO WHATSAPP
+    // Ex: "transferir 200 do Itau para Nubank"
+    // ------------------------------------------------------------------------
+    if (/transferir|transferencia|transferi|passei.*para/i.test(txtLimpo)) {
+      const textoNormTransf = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
+      const matchVal = textoNormTransf.match(/(\d+\.\d{2}|\d+)/);
+      if (matchVal) {
+        const valorTransf = parseFloat(matchVal[0]);
+        let bancoOrigem = null;
+        let bancoDestino = null;
+
+        for (const b of bancos) {
+          const nomeB = semAcento(b.nome);
+          const regexOrigem = new RegExp(`(?:do|da|de)\\s+${nomeB}`, 'i');
+          const regexDestino = new RegExp(`(?:para|pro|pra|no|na)\\s+${nomeB}`, 'i');
+          if (regexOrigem.test(txtLimpo)) bancoOrigem = b.nome;
+          if (regexDestino.test(txtLimpo)) bancoDestino = b.nome;
+        }
+
+        if (!bancoOrigem || !bancoDestino) {
+          const encontrados = bancos.filter(b => txtLimpo.includes(semAcento(b.nome)));
+          if (encontrados.length >= 2) {
+            bancoOrigem = encontrados[0].nome;
+            bancoDestino = encontrados[1].nome;
+          }
+        }
+
+        if (bancoOrigem && bancoDestino && valorTransf > 0) {
+          await db.collection('users').doc(userId).collection('transacoes').add({
+            descricao: `Transferência enviada para ${bancoDestino}`,
+            valor: valorTransf,
+            tipo: 'DESPESA',
+            metodo: 'TRANSFERENCIA',
+            banco_nome: bancoOrigem,
+            categoria: 'Transferência',
+            subcategoria: 'Entre Contas',
+            pago: true,
+            data_vencimento: hojeStr,
+            anoMes: anoMesAtual,
+            origem: 'WHATSAPP_IA',
+            criadoEm: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          await db.collection('users').doc(userId).collection('transacoes').add({
+            descricao: `Transferência recebida de ${bancoOrigem}`,
+            valor: valorTransf,
+            tipo: 'RECEITA',
+            metodo: 'TRANSFERENCIA',
+            banco_nome: bancoDestino,
+            categoria: 'Transferência',
+            subcategoria: 'Entre Contas',
+            pago: true,
+            data_vencimento: hojeStr,
+            anoMes: anoMesAtual,
+            origem: 'WHATSAPP_IA',
+            criadoEm: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          await sock.sendMessage(remoteJid, {
+            text: `🔄 *Transferência Realizada com Sucesso!*\n\n` +
+                  `• Origem: *${bancoOrigem}* (- R$ ${valorTransf.toFixed(2)})\n` +
+                  `• Destino: *${bancoDestino}* (+ R$ ${valorTransf.toFixed(2)})\n` +
+                  `• Data: *${formatarDataBR(hojeStr)}*`
+          });
+          return;
+        }
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // MELHORIA 2 & 10: DAR BAIXA EM CONTAS EM ABERTO OU PAGAR FATURA PELO WHATSAPP
+    // Ex: "dar baixa na agua", "paguei a luz no pix Itau", "paguei a fatura do VISA"
+    // ------------------------------------------------------------------------
+    const isComandoBaixa = /^(paguei|dar baixa|baixa|quitei|pagar fatura)/i.test(txtLimpo) && !/\b\d+[,\.]\d{2}\b/.test(textoUsuario);
+    if (isComandoBaixa) {
+      const snapMes = await db.collection('users').doc(userId).collection('transacoes')
+        .where('anoMes', '==', anoMesAtual)
+        .get();
+      const transMes = snapMes.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      const bancoInformado = bancos.find(b => txtLimpo.includes(semAcento(b.nome)));
+
+      // A) Verifica se é pagamento de FATURA de cartão
+      if (/fatura/i.test(txtLimpo)) {
+        const cartaoAlvo = cartoes.find(c => txtLimpo.includes(semAcento(c.nome))) || cartoes[0];
+        if (cartaoAlvo) {
+          const itensFatura = transMes.filter(
+            t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoAlvo.nome) && !t.fatura_paga
+          );
+          const totalFatura = itensFatura.reduce((a, b) => a + Number(b.valor || 0), 0);
+
+          if (totalFatura <= 0) {
+            await sock.sendMessage(remoteJid, { text: `✅ A fatura do cartão *${cartaoAlvo.nome}* em ${anoMesAtual} já consta como paga!` });
+            return;
+          }
+
+          if (!bancoInformado) {
+            const listaBancos = bancos.map(b => b.nome).join(' ou ');
+            await userRef.set({
+              pendente_pagamento: {
+                etapa: 'PAGAR_FATURA_BANCO',
+                cartaoNome: cartaoAlvo.nome,
+                valorFatura: totalFatura,
+                criadoEm: Date.now()
+              }
+            }, { merge: true });
+
+            await sock.sendMessage(remoteJid, {
+              text: `💳 *Pagamento da Fatura ${cartaoAlvo.nome} (R$ ${totalFatura.toFixed(2)})*\n\n` +
+                    `🏦 *De qual conta bancária vai debitar o valor?*\nResponda com: *${listaBancos}*`
+            });
+            return;
+          }
+
+          const batch = db.batch();
+          snapMes.docs.forEach(d => {
+            const dt = d.data();
+            if (dt.tipo === 'DESPESA' && semAcento(dt.cartao_nome) === semAcento(cartaoAlvo.nome) && !dt.fatura_paga) {
+              batch.update(d.ref, { fatura_paga: true });
+            }
+          });
+          await batch.commit();
+
+          await db.collection('users').doc(userId).collection('transacoes').add({
+            descricao: `Pagamento Fatura Cartão ${cartaoAlvo.nome}`,
+            valor: totalFatura,
+            tipo: 'DESPESA',
+            metodo: 'PAGAMENTO_FATURA',
+            cartao_nome: null,
+            banco_nome: bancoInformado.nome,
+            categoria: 'Contas',
+            subcategoria: 'Fatura Cartão',
+            pago: true,
+            data_vencimento: hojeStr,
+            anoMes: anoMesAtual,
+            origem: 'WHATSAPP_IA',
+            criadoEm: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          await sock.sendMessage(remoteJid, {
+            text: `✅ *Fatura ${cartaoAlvo.nome} paga com sucesso!*\n💰 Valor: R$ ${totalFatura.toFixed(2)} debitado de *${bancoInformado.nome}*.`
+          });
+          return;
+        }
       }
 
-      await userRef.set({ pendente_pagamento: null }, { merge: true });
+      // B) Verifica contas em aberto no mês para dar baixa pelo nome (ex: "paguei a agua")
+      const contasAbertas = transMes.filter(t => t.pago === false);
+      const contaEncontrada = contasAbertas.find(t => {
+        const descLimpa = semAcento(t.descricao);
+        return txtLimpo.includes(descLimpa) || descLimpa.split(' ').some(palavra => palavra.length > 2 && txtLimpo.includes(palavra));
+      });
+
+      if (contaEncontrada) {
+        const metodoBaixa = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
+        if (!bancoInformado) {
+          const listaBancos = bancos.map(b => b.nome).join(' ou ');
+          await userRef.set({
+            pendente_pagamento: {
+              etapa: 'BAIXA_CONTA_BANCO',
+              docId: contaEncontrada.id,
+              descricao: contaEncontrada.descricao,
+              valor: contaEncontrada.valor,
+              metodo: metodoBaixa,
+              criadoEm: Date.now()
+            }
+          }, { merge: true });
+
+          await sock.sendMessage(remoteJid, {
+            text: `🏦 *Dar baixa em: ${contaEncontrada.descricao} (R$ ${Number(contaEncontrada.valor).toFixed(2)})*\n\n` +
+                  `De qual conta bancária saiu o pagamento?\nResponda com: *${listaBancos}*`
+          });
+          return;
+        }
+
+        await db.collection('users').doc(userId).collection('transacoes').doc(contaEncontrada.id).update({
+          pago: true,
+          metodo: metodoBaixa,
+          banco_nome: bancoInformado.nome,
+          data_pagamento: hojeStr
+        });
+
+        await sock.sendMessage(remoteJid, {
+          text: `✅ *Baixa realizada com sucesso!*\n• *${contaEncontrada.descricao}* — R$ ${Number(contaEncontrada.valor).toFixed(2)}\n• Debitado de: *${bancoInformado.nome}* (${metodoBaixa})`
+        });
+        return;
+      }
     }
 
     // ------------------------------------------------------------------------
@@ -715,7 +1220,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
     // ------------------------------------------------------------------------
-    // MODO 1: CONSULTOR FINANCEIRO (Categorias, Cartões, Saldos de Bancos e Resumo)
+    // MODO 1: CONSULTOR FINANCEIRO (Categorias, Cartões, Saldos e Cheque Especial)
     // ------------------------------------------------------------------------
     const isPergunta = /\?|quanto|qual|resumo|saldo|saldos|fatura|limite|disponivel|melhor dia|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLimpo);
     
@@ -724,11 +1229,10 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       const todasTrans = snapAll.docs.map(d => d.data());
       const transMes = todasTrans.filter(t => t.anoMes === anoMesAtual);
 
-      // A) Categoria específica
       const catPerguntada = categorias.find(cat => txtLimpo.includes(semAcento(cat)));
       if (catPerguntada) {
         const gastoCat = transMes
-          .filter(t => t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(catPerguntada) && t.metodo !== 'PAGAMENTO_FATURA')
+          .filter(t => t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(catPerguntada) && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
           .reduce((a, b) => a + Number(b.valor || 0), 0);
 
         const limiteCat = Number(orcamentos[catPerguntada] || 0);
@@ -752,7 +1256,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // B) Cartão específico
       const cartaoPerguntado = cartoes.find(c => txtLimpo.includes(semAcento(c.nome)));
       if (cartaoPerguntado) {
         const faturaMes = transMes
@@ -777,7 +1280,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // C) Cartões em geral
       if (/cartao|cartoes|fatura|melhor dia/i.test(txtLimpo)) {
         let msgCartoes = `💳 *Resumo dos seus Cartões*\n\n`;
         for (const c of cartoes) {
@@ -794,9 +1296,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         return;
       }
 
-      // D) Resumo Geral + Saldos de cada Conta Bancária
-      const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false).reduce((a, b) => a + Number(b.valor || 0), 0);
-      const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA').reduce((a, b) => a + Number(b.valor || 0), 0);
+      const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false && t.metodo !== 'TRANSFERENCIA').reduce((a, b) => a + Number(b.valor || 0), 0);
+      const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA').reduce((a, b) => a + Number(b.valor || 0), 0);
 
       let linhasBancos = '';
       let somaBancos = 0;
@@ -809,33 +1310,31 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           .reduce((a, x) => a + Number(x.valor || 0), 0);
         const sldB = Number(b.saldoInicial || 0) + entB - saiB;
         somaBancos += sldB;
-        linhasBancos += `• *${b.nome}:* R$ ${sldB.toFixed(2)}\n`;
+        linhasBancos += `• *${b.nome}:* R$ ${sldB.toFixed(2)} ${sldB < 0 ? '🚨 *(Cheque Especial)*' : ''}\n`;
       });
 
       await sock.sendMessage(remoteJid, {
         text: `📊 *Resumo FinZap (${anoMesAtual})*\n\n` +
-              `🟢 Receitas Efetivadas: R$ ${rec.toFixed(2)}\n` +
+              `🟢 Receitas do Mês: R$ ${rec.toFixed(2)}\n` +
               `🔴 Despesas do Mês: R$ ${desp.toFixed(2)}\n` +
-              `📈 Resultado do Mês: *R$ ${(rec - desp).toFixed(2)}*\n\n` +
-              `🏦 *Saldos por Conta:*\n${linhasBancos}` +
+              `📈 Resultado: *R$ ${(rec - desp).toFixed(2)}*\n\n` +
+              `🏦 *Saldos por Conta:*\n${linhasBancos}\n` +
               `💰 *Saldo Geral Disponível: R$ ${somaBancos.toFixed(2)}*`
       });
       return;
     }
 
     // ------------------------------------------------------------------------
-    // MODO 2: LANÇAMENTOS (Gastos imediatos, Parcelados ou Contas com Vencimento Futuro)
+    // MODO 2: LANÇAMENTOS (Com Subcategorias e Pergunta de Banco/Método/Categoria)
     // ------------------------------------------------------------------------
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
     
-    let itensComMetodo = [];
-    let itensSemMetodo = [];
+    let itensExtraidos = [];
 
     for (const parte of partes) {
       const pLimpo = semAcento(parte);
 
-      // 1. Verifica se possui data de vencimento / agendamento (ex: "Agua vence 25/10 valor 10.00")
       const infoVencimento = extrairDataVencimento(parte);
       const isAgendado = Boolean(infoVencimento) || /vence|vencimento|a pagar|a receber|boleto para/i.test(pLimpo);
 
@@ -868,13 +1367,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         }
       }
 
-      if (!metodo) {
-        for (const b of bancos) {
-          if (pLimpo.includes(semAcento(b.nome))) {
-            metodo = /pix/i.test(pLimpo) ? 'PIX' : 'DEBITO';
-            bancoNome = b.nome;
-            break;
+      for (const b of bancos) {
+        if (pLimpo.includes(semAcento(b.nome))) {
+          bancoNome = b.nome;
+          if (!metodo) {
+            metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX';
           }
+          break;
         }
       }
 
@@ -884,33 +1383,19 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           cartaoNome = cartoes[0]?.nome || 'CREDITO';
         } else if (/debito/i.test(pLimpo)) {
           metodo = 'DEBITO';
-          bancoNome = bancos[0]?.nome || null;
         } else if (/pix/i.test(pLimpo)) {
           metodo = 'PIX';
-          bancoNome = bancos[0]?.nome || null;
         } else if (/dinheiro|especie/i.test(pLimpo)) {
           metodo = 'DINHEIRO';
         } else if (isAgendado) {
           metodo = 'BOLETO / AGENDADO';
         } else if (isReceita) {
           metodo = 'PIX';
-          bancoNome = bancos[0]?.nome || null;
         }
       }
 
-      let categoria = isReceita ? 'Receita' : 'Outros';
-      if (/mercado|supermercado|compras|cebola|atacadao|acougue|hortifruti/i.test(pLimpo)) categoria = 'Mercado';
-      else if (/lanche|restaurante|ifood|padaria|almoco|jantar|burger|pizza|cafe/i.test(pLimpo)) categoria = 'Alimentação';
-      else if (/uber|gasolina|combustivel|posto|estacionamento|pedagio/i.test(pLimpo)) categoria = 'Transporte';
-      else if (/cinema|passeio|bar|viagem|lazer|shopping|netflix|streaming/i.test(pLimpo)) categoria = 'Lazer';
-      else if (/luz|agua|internet|energia|boleto|aluguel|condominio|vence|vencimento/i.test(pLimpo)) categoria = 'Contas';
-
-      for (const cat of categorias) {
-        if (pLimpo.includes(semAcento(cat))) {
-          categoria = cat;
-          break;
-        }
-      }
+      // MELHORIA 9: Reconhecimento automático de Categoria e Subcategoria
+      const classif = classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategorias);
 
       let descricao = textoSemParcela
         .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|a pagar|a receber|dia|no cartao de credito|no cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |do |da |no |na |em /gi, ' ')
@@ -920,10 +1405,10 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         .replace(/\s+/g, ' ')
         .trim();
 
-      if (!descricao || descricao.length < 2) descricao = categoria;
+      if (!descricao || descricao.length < 2) descricao = classif.subcategoria || classif.categoria || 'Lançamento';
       descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
 
-      const objItem = {
+      itensExtraidos.push({
         descricao,
         valorTotal,
         valorParcela,
@@ -932,49 +1417,17 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         metodo,
         cartao_nome: cartaoNome,
         banco_nome: bancoNome,
-        categoria,
+        categoria: classif.categoria,
+        subcategoria: classif.subcategoria,
+        precisaPerguntarCategoria: !classif.reconhecida,
         pago: !isAgendado,
         data_vencimento: infoVencimento ? infoVencimento.dataVencimento : hojeStr,
         anoMes: infoVencimento ? infoVencimento.anoMes : anoMesAtual
-      };
-
-      if (metodo || isAgendado) {
-        itensComMetodo.push(objItem);
-      } else {
-        itensSemMetodo.push(objItem);
-      }
+      });
     }
 
-    let mensagensSaida = [];
-
-    if (itensComMetodo.length > 0) {
-      const respGravados = await gravarItensNoBanco(userId, itensComMetodo, cartoes, orcamentos, anoMesAtual, textoUsuario);
-      mensagensSaida.push(...respGravados);
-    }
-
-    if (itensSemMetodo.length > 0) {
-      await userRef.set({
-        pendente_pagamento: {
-          itens: itensSemMetodo,
-          textoOriginal: textoUsuario,
-          criadoEm: Date.now()
-        }
-      }, { merge: true });
-
-      const resumoPendentes = itensSemMetodo
-        .map(i => `• *${i.descricao}* [${i.categoria}] — R$ ${i.valorTotal.toFixed(2)}`)
-        .join('\n');
-
-      const opcoesCartoes = cartoes.map(c => c.nome).join(', ');
-      mensagensSaida.push(
-        `❓ *Qual foi a forma de pagamento?*\n` +
-        `${resumoPendentes}\n\n` +
-        `Responda com: *Pix*, *Débito*, *Dinheiro* ou o nome do cartão (*${opcoesCartoes}*).`
-      );
-    }
-
-    if (mensagensSaida.length > 0) {
-      await sock.sendMessage(remoteJid, { text: mensagensSaida.join('\n\n') });
+    if (itensExtraidos.length > 0) {
+      await processarFilaDePendencias(userId, itensExtraidos, cartoes, bancos, orcamentos, anoMesAtual, textoUsuario, sock, remoteJid);
     }
 
   } catch (e) {
@@ -983,7 +1436,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 }
 
 // ============================================================================
-// 8. AUTO-RECONEXÃO QUANDO O SERVIDOR REINICIA
+// 9. AUTO-RECONEXÃO QUANDO O SERVIDOR REINICIA
 // ============================================================================
 async function restaurarSessoesAtivas() {
   try {

@@ -4,7 +4,8 @@ import {
   Plus, Trash2, QrCode, Send, LogOut, BarChart2, Calendar, 
   FolderPlus, Target, AlertTriangle, Sparkles, CheckCircle2, 
   Clock, Zap, BrainCircuit, RefreshCw, Landmark, 
-  Edit3, X, ShieldAlert, Search, FileText, BellRing
+  Edit3, X, ShieldAlert, Search, FileText, BellRing, 
+  ArrowRightLeft, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { db, auth } from './firebaseConfig';
 import { 
@@ -30,6 +31,44 @@ const formatarDataBR = (isoDate) => {
   return `${d}/${m}/${a}`;
 };
 
+const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMap) => {
+  const pLimpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  if (isReceita) return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
+
+  if (/mercado|supermercado|atacadao|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|ovo|leite|pao|queijo|sabao|detergente/i.test(pLimpo)) {
+    return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
+  }
+  if (/lanche|hamburguer|burger|pizza|restaurante|ifood|padaria|almoco|jantar|cafe|sorvete|acai|pastel|barzinho|cerveja|refrigerante|bolo|chocolate/i.test(pLimpo)) {
+    return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
+  }
+  if (/uber|99|taxi|onibus|estacionamento|pedagio/i.test(pLimpo)) {
+    return { categoria: 'Transporte', subcategoria: 'Apps / Pedágio', reconhecida: true };
+  }
+  if (/gasolina|etanol|diesel|combustivel|posto/i.test(pLimpo)) {
+    return { categoria: 'Transporte', subcategoria: 'Combustível', reconhecida: true };
+  }
+  if (/cinema|passeio|show|viagem|shopping|netflix|spotify|streaming/i.test(pLimpo)) {
+    return { categoria: 'Lazer', subcategoria: 'Passeios / Streaming', reconhecida: true };
+  }
+  if (/luz|energia|agua|gas|internet|telefone|aluguel|condominio|boleto|farmacia|remedio|medico/i.test(pLimpo)) {
+    return { categoria: 'Contas', subcategoria: 'Casa / Fixas', reconhecida: true };
+  }
+
+  for (const cat of categorias) {
+    const subs = subcategoriasMap[cat] || [];
+    for (const sub of subs) {
+      if (pLimpo.includes(sub.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())) {
+        return { categoria: cat, subcategoria: sub, reconhecida: true };
+      }
+    }
+    if (pLimpo.includes(cat.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())) {
+      return { categoria: cat, subcategoria: subs[0] || 'Geral', reconhecida: true };
+    }
+  }
+
+  return { categoria: null, subcategoria: null, reconhecida: false };
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [carregandoAuth, setCarregandoAuth] = useState(true);
@@ -42,10 +81,10 @@ export default function App() {
   const [abaAtiva, setAbaAtiva] = useState('dashboard');
   const [transacoes, setTransacoes] = useState([]);
 
-  // Cartões de Crédito (Com Limite, Fechamento, Vencimento e Melhor Dia)
+  // Cartões de Crédito
   const [cartoes, setCartoes] = useState([
     { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12, banco: 'Itaú' },
-    { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17, banco: 'Nubank' }
+    { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17, banco: 'Nubank Conta' }
   ]);
 
   // Bancos e Contas (Saldos Individuais)
@@ -54,7 +93,16 @@ export default function App() {
     { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
   ]);
   
-  const [categorias, setCategorias] = useState(['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
+  // Categorias e Subcategorias (Melhoria 9)
+  const [categorias, setCategorias] = useState(['Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
+  const [subcategorias, setSubcategorias] = useState({
+    'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Padaria'],
+    'Transporte': ['Combustível', 'Apps / Pedágio', 'Manutenção'],
+    'Lazer': ['Passeios', 'Streaming', 'Viagens'],
+    'Contas': ['Casa / Fixas', 'Saúde / Farmácia', 'Fatura Cartão'],
+    'Receita': ['Salário', 'Vendas / Extras'],
+    'Outros': ['Geral']
+  });
   const [orcamentos, setOrcamentos] = useState({});
   const [contasFixas, setContasFixas] = useState([
     { id: 'f1', nome: 'Energia Elétrica', valorPadrao: 180, diaVencimento: 15, categoria: 'Contas' },
@@ -71,8 +119,10 @@ export default function App() {
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
   const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
 
-  // Estados de Formulários - Categorias e Lembretes Fixos
+  // Estados de Formulários - Categorias, Subcategorias e Lembretes Fixos
   const [novaCatNome, setNovaCatNome] = useState('');
+  const [catSelecionadaParaSub, setCatSelecionadaParaSub] = useState('Alimentação');
+  const [novaSubNome, setNovaSubNome] = useState('');
   const [orcamentoCat, setOrcamentoCat] = useState('');
   const [orcamentoValor, setOrcamentoValor] = useState('');
   const [fixaNome, setFixaNome] = useState('');
@@ -83,6 +133,14 @@ export default function App() {
   const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
 
+  // Estado de Transferência entre Contas (Melhoria 1)
+  const [formTransferencia, setFormTransferencia] = useState({
+    bancoOrigem: 'Itaú',
+    bancoDestino: 'Nubank Conta',
+    valor: '',
+    data: hojeIso
+  });
+
   // Estados da Aba "Contas a Vencer & Receber"
   const [formAgendamento, setFormAgendamento] = useState({
     descricao: '',
@@ -90,26 +148,31 @@ export default function App() {
     data_vencimento: hojeIso,
     tipo: 'DESPESA',
     categoria: 'Contas',
+    subcategoria: 'Casa / Fixas',
     banco_nome: 'Itaú',
     pago: false
   });
   const [filtroVencNome, setFiltroVencNome] = useState('');
   const [filtroVencCat, setFiltroVencCat] = useState('TODAS');
-  const [filtroVencStatus, setFiltroVencStatus] = useState('ABERTO'); // TODOS, ABERTO, PAGO
-  const [filtroVencData, setFiltroVencData] = useState('TODOS'); // TODOS, PROXIMOS_5_DIAS, VENCIDOS
+  const [filtroVencStatus, setFiltroVencStatus] = useState('ABERTO');
+  const [filtroVencData, setFiltroVencData] = useState('TODOS');
+
+  // Modal para perguntar de qual conta debitar ao dar baixa em conta agendada
+  const [modalBaixaConta, setModalBaixaConta] = useState(null);
 
   // Estados da Aba "Movimentação (Extrato)"
   const [pesquisaExtrato, setPesquisaExtrato] = useState('');
-  const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS'); // TODOS, RECEITA, DESPESA, CREDITO, FATURA
+  const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
 
-  // Estados da Aba Cartão de Crédito & Modal de Pagamento Total/Parcial
+  // Estados da Aba Cartão de Crédito & Modal de Pagamento Total/Parcial (Melhoria 4, 7 e 10)
   const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
   const [novaCompraCartao, setNovaCompraCartao] = useState({
     descricao: '',
     valorTotal: '',
     parcelas: '1',
     cartaoNome: 'VISA',
-    categoria: 'Alimentação'
+    categoria: 'Alimentação',
+    subcategoria: 'Lazer'
   });
   const [modalPagarFatura, setModalPagarFatura] = useState(null);
   const [transacaoEditando, setTransacaoEditando] = useState(null);
@@ -120,12 +183,21 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nTodos os recursos estão ativos:\n1️⃣ Agendar vencimento: "Água vence 25/10 valor 85,00"\n2️⃣ Consultar: "contas a vencer" ou "contas proximas do vencimento"\n3️⃣ Sem método: "Gastei 50 na padaria" (eu pergunto qual foi!)\n4️⃣ Cartões e Saldos: "Qual meu saldo?" ou "Fatura do VISA"\n5️⃣ Apagar: "desfazer"' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ "comprei maçã 5,00 no débito" -> Reconhece Alimentação > Mercado e pergunta de qual banco saiu!\n2️⃣ "comprei lanche 35,00" -> Vai para Alimentação > Lazer.\n3️⃣ "transferir 200 do Itaú para Nubank"\n4️⃣ "paguei a água" -> Dá baixa pelo WhatsApp.\n5️⃣ Envie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
 
   const CORES_GRAFICO = ['#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa', '#2dd4bf', '#fb7185', '#60a5fa'];
+
+  // Função para navegar entre os meses facilmente (Melhoria 5)
+  const alterarMesCompetencia = (delta) => {
+    const [ano, mes] = filtroMesAno.split('-').map(Number);
+    const novaData = new Date(ano, (mes - 1) + delta, 15);
+    const novoAno = novaData.getFullYear();
+    const novoMes = String(novaData.getMonth() + 1).padStart(2, '0');
+    setFiltroMesAno(`${novoAno}-${novoMes}`);
+  };
 
   // 1. Autenticação e Carregamento Inicial
   useEffect(() => {
@@ -137,6 +209,7 @@ export default function App() {
         if (userSnap.exists()) {
           const dados = userSnap.data();
           if (dados.categorias) setCategorias(dados.categorias);
+          if (dados.subcategorias) setSubcategorias(dados.subcategorias);
           if (dados.orcamentos) setOrcamentos(dados.orcamentos);
           if (dados.cartoes) setCartoes(dados.cartoes);
           if (dados.bancos) setBancos(dados.bancos);
@@ -146,6 +219,7 @@ export default function App() {
         } else {
           await setDoc(userDocRef, { 
             categorias, 
+            subcategorias,
             orcamentos: {}, 
             cartoes, 
             bancos,
@@ -175,6 +249,7 @@ export default function App() {
         if (data.cartoes) setCartoes(data.cartoes);
         if (data.bancos) setBancos(data.bancos);
         if (data.contasFixas) setContasFixas(data.contasFixas);
+        if (data.subcategorias) setSubcategorias(data.subcategorias);
       }
     });
 
@@ -196,6 +271,7 @@ export default function App() {
         return {
           id: docSnap.id,
           ...dataDoc,
+          subcategoria: dataDoc.subcategoria || 'Geral',
           pago: dataDoc.pago !== undefined ? dataDoc.pago : true,
           data_vencimento: dataIso || `${anoMes || mesAtualStr}-10`,
           anoMes: anoMes || mesAtualStr
@@ -267,6 +343,58 @@ export default function App() {
     } catch (e) {
       alert('Erro ao acionar verificação no servidor.');
     }
+  };
+
+  // ==========================================================================
+  // MELHORIA 1: TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS
+  // ==========================================================================
+  const realizarTransferenciaEntreContas = async (e) => {
+    e.preventDefault();
+    if (!user || !formTransferencia.valor) return;
+    if (formTransferencia.bancoOrigem === formTransferencia.bancoDestino) {
+      return alert('Selecione contas diferentes para a origem e o destino da transferência.');
+    }
+
+    const valorNum = parseFloat(formTransferencia.valor);
+    if (isNaN(valorNum) || valorNum <= 0) return alert('Informe um valor válido.');
+
+    const dataTransf = formTransferencia.data || hojeIso;
+    const anoMesTransf = dataTransf.slice(0, 7);
+
+    // Saída do Banco de Origem
+    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+      descricao: `Transferência enviada para ${formTransferencia.bancoDestino}`,
+      valor: valorNum,
+      tipo: 'DESPESA',
+      metodo: 'TRANSFERENCIA',
+      cartao_nome: null,
+      banco_nome: formTransferencia.bancoOrigem,
+      categoria: 'Transferência',
+      subcategoria: 'Entre Contas',
+      pago: true,
+      data_vencimento: dataTransf,
+      anoMes: anoMesTransf,
+      criadoEm: serverTimestamp()
+    });
+
+    // Entrada no Banco de Destino
+    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+      descricao: `Transferência recebida de ${formTransferencia.bancoOrigem}`,
+      valor: valorNum,
+      tipo: 'RECEITA',
+      metodo: 'TRANSFERENCIA',
+      cartao_nome: null,
+      banco_nome: formTransferencia.bancoDestino,
+      categoria: 'Transferência',
+      subcategoria: 'Entre Contas',
+      pago: true,
+      data_vencimento: dataTransf,
+      anoMes: anoMesTransf,
+      criadoEm: serverTimestamp()
+    });
+
+    setFormTransferencia({ ...formTransferencia, valor: '' });
+    alert(`🔄 Transferência de R$ ${valorNum.toFixed(2)} de ${formTransferencia.bancoOrigem} para ${formTransferencia.bancoDestino} registrada!`);
   };
 
   // ==========================================================================
@@ -347,7 +475,7 @@ export default function App() {
   };
 
   // ==========================================================================
-  // GESTÃO DE CONTAS A VENCER, A RECEBER E LEMBRETES RECORRENTES
+  // GESTÃO DE CONTAS A VENCER, A RECEBER E BAIXA ESCOLHENDO O BANCO
   // ==========================================================================
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
@@ -363,6 +491,7 @@ export default function App() {
       cartao_nome: null,
       banco_nome: formAgendamento.banco_nome || bancos[0]?.nome || null,
       categoria: formAgendamento.categoria,
+      subcategoria: formAgendamento.subcategoria || 'Geral',
       pago: Boolean(formAgendamento.pago),
       data_vencimento: formAgendamento.data_vencimento || hojeIso,
       anoMes: anoMesVenc,
@@ -373,14 +502,28 @@ export default function App() {
     setFormAgendamento({ ...formAgendamento, descricao: '', valor: '', pago: false });
   };
 
-  const alternarStatusPago = async (transacao) => {
-    if (!user) return;
-    const novoStatus = !transacao.pago;
+  const clicarDarBaixaConta = (transacao) => {
+    if (transacao.pago) {
+      updateDoc(doc(db, 'users', user.uid, 'transacoes', transacao.id), { pago: false });
+    } else {
+      setModalBaixaConta({
+        transacao,
+        bancoEscolhido: transacao.banco_nome || bancos[0]?.nome || 'Itaú',
+        metodoEscolhido: 'PIX'
+      });
+    }
+  };
+
+  const confirmarBaixaContaModal = async (e) => {
+    e.preventDefault();
+    if (!modalBaixaConta || !user) return;
+    const { transacao, bancoEscolhido, metodoEscolhido } = modalBaixaConta;
     await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacao.id), {
-      pago: novoStatus,
-      metodo: novoStatus && transacao.metodo === 'BOLETO / AGENDADO' ? 'PIX/BOLETO' : transacao.metodo,
-      banco_nome: transacao.banco_nome || bancos[0]?.nome || null
+      pago: true,
+      metodo: metodoEscolhido,
+      banco_nome: bancoEscolhido
     });
+    setModalBaixaConta(null);
   };
 
   const adicionarContaFixa = async (e) => {
@@ -413,10 +556,11 @@ export default function App() {
       descricao: conta.nome,
       valor: Number(conta.valorPadrao),
       tipo: 'DESPESA',
-      metodo: 'PIX/BOLETO',
+      metodo: 'PIX',
       cartao_nome: null,
       banco_nome: bancos[0]?.nome || null,
       categoria: conta.categoria || 'Contas',
+      subcategoria: 'Casa / Fixas',
       pago: true,
       data_vencimento: `${filtroMesAno}-${diaStr}`,
       anoMes: filtroMesAno,
@@ -450,6 +594,7 @@ export default function App() {
         metodo: 'CREDITO',
         cartao_nome: novaCompraCartao.cartaoNome,
         categoria: novaCompraCartao.categoria,
+        subcategoria: novaCompraCartao.subcategoria || 'Geral',
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
         fatura_paga: false,
@@ -477,6 +622,7 @@ export default function App() {
     });
   };
 
+  // MELHORIA 4, 7 e 10: Confirma pagamento da fatura debitando da conta escolhida e gerando registro no Extrato
   const confirmarPagamentoFatura = async (e) => {
     e.preventDefault();
     if (!modalPagarFatura || !user) return;
@@ -496,13 +642,14 @@ export default function App() {
         });
       }
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
-        descricao: `Pagamento Total Fatura ${cartaoNome}`,
+        descricao: `Pagamento Total Fatura Cartão ${cartaoNome}`,
         valor: modalPagarFatura.valorFatura,
         tipo: 'DESPESA',
         metodo: 'PAGAMENTO_FATURA',
         cartao_nome: null,
         banco_nome: bancoSaida,
         categoria: 'Contas',
+        subcategoria: 'Fatura Cartão',
         pago: true,
         data_vencimento: hojeIso,
         anoMes: filtroMesAno,
@@ -510,12 +657,13 @@ export default function App() {
       });
     } else {
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
-        descricao: `Pagamento Parcial / Antecipação (${cartaoNome})`,
+        descricao: `Abatimento Parcial na Fatura (${cartaoNome})`,
         valor: -Math.abs(valorPagarNum),
         tipo: 'DESPESA',
         metodo: 'CREDITO',
         cartao_nome: cartaoNome,
         categoria: 'Contas',
+        subcategoria: 'Fatura Cartão',
         fatura_paga: false,
         pago: true,
         data_vencimento: hojeIso,
@@ -524,13 +672,14 @@ export default function App() {
       });
 
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
-        descricao: `Pagamento Parcial Fatura ${cartaoNome}`,
+        descricao: `Pagamento Parcial Fatura Cartão ${cartaoNome}`,
         valor: valorPagarNum,
         tipo: 'DESPESA',
         metodo: 'PAGAMENTO_FATURA',
         cartao_nome: null,
         banco_nome: bancoSaida,
         categoria: 'Contas',
+        subcategoria: 'Fatura Cartão',
         pago: true,
         data_vencimento: hojeIso,
         anoMes: filtroMesAno,
@@ -549,6 +698,7 @@ export default function App() {
       descricao: transacaoEditando.descricao,
       valor: Number(transacaoEditando.valor),
       categoria: transacaoEditando.categoria,
+      subcategoria: transacaoEditando.subcategoria || 'Geral',
       metodo: transacaoEditando.metodo,
       data_vencimento: transacaoEditando.data_vencimento || hojeIso,
       pago: Boolean(transacaoEditando.pago),
@@ -559,7 +709,7 @@ export default function App() {
   };
 
   // ==========================================================================
-  // CATEGORIAS & ORÇAMENTOS
+  // CATEGORIAS, SUBCATEGORIAS & ORÇAMENTOS (MELHORIA 9)
   // ==========================================================================
   const adicionarCategoria = async (e) => {
     e.preventDefault();
@@ -567,9 +717,23 @@ export default function App() {
     const catFormatada = novaCatNome.charAt(0).toUpperCase() + novaCatNome.slice(1).toLowerCase();
     if (categorias.includes(catFormatada)) return alert('Esta categoria já existe!');
     const novasCats = [...categorias, catFormatada];
+    const novasSubs = { ...subcategorias, [catFormatada]: ['Geral'] };
     setCategorias(novasCats);
+    setSubcategorias(novasSubs);
     setNovaCatNome('');
-    await setDoc(doc(db, 'users', user.uid), { categorias: novasCats }, { merge: true });
+    await setDoc(doc(db, 'users', user.uid), { categorias: novasCats, subcategorias: novasSubs }, { merge: true });
+  };
+
+  const adicionarSubcategoria = async (e) => {
+    e.preventDefault();
+    if (!novaSubNome.trim() || !catSelecionadaParaSub || !user) return;
+    const subFormatada = novaSubNome.charAt(0).toUpperCase() + novaSubNome.slice(1);
+    const atuais = subcategorias[catSelecionadaParaSub] || [];
+    if (atuais.includes(subFormatada)) return alert('Esta subcategoria já existe!');
+    const novasSubs = { ...subcategorias, [catSelecionadaParaSub]: [...atuais, subFormatada] };
+    setSubcategorias(novasSubs);
+    setNovaSubNome('');
+    await setDoc(doc(db, 'users', user.uid), { subcategorias: novasSubs }, { merge: true });
   };
 
   const definirOrcamento = async (e) => {
@@ -592,7 +756,7 @@ export default function App() {
   };
 
   // ==========================================================================
-  // SIMULADOR INTELIGENTE NO PAINEL (COM VENCIMENTOS FUTUROS E CONSULTAS)
+  // SIMULADOR INTELIGENTE NO PAINEL (COM TODAS AS REGRAS DO WHATSAPP)
   // ==========================================================================
   const extrairDataTextoSimulador = (texto) => {
     const anoAtual = dataAtualObj.getFullYear();
@@ -636,12 +800,20 @@ export default function App() {
 
     let metodo = null;
     let cartaoIdentificado = null;
-    let bancoIdentificado = bancos[0]?.nome || null;
+    let bancoIdentificado = null;
 
     for (const c of cartoes) {
       if (txtLower.includes(c.nome.toLowerCase())) {
         cartaoIdentificado = c.nome;
         metodo = 'CREDITO';
+        break;
+      }
+    }
+
+    for (const b of bancos) {
+      if (txtLower.includes(b.nome.toLowerCase())) {
+        bancoIdentificado = b.nome;
+        if (!metodo) metodo = /débito|debito/i.test(txtLower) ? 'DEBITO' : 'PIX';
         break;
       }
     }
@@ -663,28 +835,17 @@ export default function App() {
       }
     }
 
-    let categoria = isReceita ? 'Receita' : 'Outros';
-    if (/mercado|supermercado|atacadão|compras|açougue|hortifruti|cebola/i.test(txtLower)) categoria = 'Mercado';
-    else if (/lanche|restaurante|ifood|padaria|almoço|jantar|burger|pizza|café/i.test(txtLower)) categoria = 'Alimentação';
-    else if (/uber|gasolina|combustível|posto|99|estacionamento|pedágio/i.test(txtLower)) categoria = 'Transporte';
-    else if (/cinema|passeio|bar|viagem|streaming|netflix|jogo|shopping/i.test(txtLower)) categoria = 'Lazer';
-    else if (/luz|água|agua|internet|energia|boleto|aluguel|condomínio|vence/i.test(txtLower)) categoria = 'Contas';
-
-    for (const cat of categorias) {
-      if (txtLower.includes(cat.toLowerCase())) {
-        categoria = cat;
-        break;
-      }
-    }
+    const classif = classificarCategoriaLocal(trecho, isReceita, categorias, subcategorias);
 
     let descricao = textoSemParcela
-      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|dia|no cartão de credito|no cartão|no credito|no pix|no débito|credito|debito|pix|dinheiro|reais|r\$|de |em /gi, ' ')
+      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|dia|no cartão de credito|no cartão|no credito|no pix|no débito|no debito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |em /gi, ' ')
       .replace(matchValor[0], '')
       .replace(cartaoIdentificado ? new RegExp(cartaoIdentificado, 'gi') : '', '')
+      .replace(bancoIdentificado ? new RegExp(bancoIdentificado, 'gi') : '', '')
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (!descricao || descricao.length < 2) descricao = categoria;
+    if (!descricao || descricao.length < 2) descricao = classif.subcategoria || classif.categoria || 'Gasto';
     descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
 
     return {
@@ -696,7 +857,9 @@ export default function App() {
       metodo,
       cartao_nome: cartaoIdentificado,
       banco_nome: bancoIdentificado,
-      categoria,
+      categoria: classif.categoria,
+      subcategoria: classif.subcategoria,
+      precisaPerguntarCategoria: !classif.reconhecida,
       pago: !isAgendado,
       data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeIso,
       anoMes: infoVenc ? infoVenc.anoMes : filtroMesAno
@@ -709,6 +872,9 @@ export default function App() {
 
     for (const dados of itens) {
       const pTotal = dados.parcelasTotal || 1;
+      const catFinal = dados.categoria || 'Outros';
+      const subFinal = dados.subcategoria || 'Geral';
+
       for (let i = 0; i < pTotal; i++) {
         let anoMesItem = dados.anoMes || filtroMesAno;
         let dataVencItem = dados.data_vencimento || hojeIso;
@@ -727,8 +893,9 @@ export default function App() {
           tipo: dados.tipo,
           metodo: dados.metodo,
           cartao_nome: dados.cartao_nome,
-          banco_nome: dados.banco_nome || bancos[0]?.nome || null,
-          categoria: dados.categoria,
+          banco_nome: dados.banco_nome || null,
+          categoria: catFinal,
+          subcategoria: subFinal,
           parcela_atual: i + 1,
           parcelas_total: pTotal,
           fatura_paga: false,
@@ -742,29 +909,57 @@ export default function App() {
 
       if (dados.pago === false) {
         resumoRespostas.push(
-          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${dados.categoria}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
+          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} > ${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
         );
       } else {
-        let alertaExtra = '';
-        if (dados.metodo === 'CREDITO' && dados.cartao_nome) {
-          const cObj = cartoes.find(c => c.nome.toLowerCase() === dados.cartao_nome.toLowerCase());
-          if (cObj && cObj.limite > 0) {
-            const compAtual = transacoes
-              .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cObj.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
-              .reduce((a, b) => a + Number(b.valor || 0), 0) + (dados.valorParcela * pTotal);
-            const pct = Math.round((compAtual / cObj.limite) * 100);
-            const disp = cObj.limite - compAtual;
-            if (pct >= 100) alertaExtra += `\n🚨 *ALERTA:* Limite do cartão ${cObj.nome} estourado! (${pct}%)`;
-            else if (pct >= 80) alertaExtra += `\n⚠️ *Atenção:* ${pct}% do limite do ${cObj.nome} comprometido! Restam R$ ${disp.toFixed(2)}`;
-          }
-        }
+        const origem = dados.metodo === 'CREDITO' ? `Cartão ${dados.cartao_nome}` : `${dados.metodo} (${dados.banco_nome || 'Geral'})`;
         resumoRespostas.push(
-          `✅ *${dados.descricao}* [${dados.categoria}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} (${dados.cartao_nome || dados.metodo})${alertaExtra}`
+          `✅ *${dados.descricao}* [${catFinal} > ${subFinal}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} • ${origem}`
         );
       }
     }
 
     return resumoRespostas;
+  };
+
+  const verificarPendenciasSimulador = async (itens, textoOriginal) => {
+    const prontos = [];
+    const pendentes = [];
+
+    for (const item of itens) {
+      const faltaMetodo = !item.metodo && item.pago !== false;
+      const faltaBanco = (item.metodo === 'PIX' || item.metodo === 'DEBITO') && !item.banco_nome && item.pago !== false;
+      const faltaCat = !item.categoria || item.precisaPerguntarCategoria;
+
+      if (!faltaMetodo && !faltaBanco && !faltaCat) prontos.push(item);
+      else pendentes.push(item);
+    }
+
+    let msgs = [];
+    if (prontos.length > 0) {
+      const r = await gravarItensSimulador(prontos, textoOriginal);
+      msgs.push(...r);
+    }
+
+    if (pendentes.length > 0) {
+      const prim = pendentes[0];
+      const listaStr = pendentes.map(i => `• *${i.descricao}* — R$ ${i.valorTotal.toFixed(2)}`).join('\n');
+
+      if (!prim.metodo && prim.pago !== false) {
+        setPendenteSimulador({ etapa: 'METODO', itens: pendentes, textoOriginal });
+        msgs.push(`❓ *Qual foi a forma de pagamento?*\n${listaStr}\n\nResponda com: *Pix*, *Débito*, *Dinheiro* ou o cartão (*${cartoes.map(c => c.nome).join(', ')}*).`);
+      } else if ((prim.metodo === 'PIX' || prim.metodo === 'DEBITO') && !prim.banco_nome && prim.pago !== false) {
+        setPendenteSimulador({ etapa: 'BANCO', itens: pendentes, textoOriginal });
+        msgs.push(`🏦 *De qual conta bancária vai sair esse ${prim.metodo}?*\n${listaStr}\n\nResponda com: *${bancos.map(b => b.nome).join(' ou ')}*.`);
+      } else {
+        setPendenteSimulador({ etapa: 'CATEGORIA', itens: pendentes, textoOriginal });
+        msgs.push(`📂 *Em qual Categoria e Subcategoria deseja lançar?*\n${listaStr}\n\nResponda por exemplo: *Mercado*, *Lazer*, *Transporte* ou *Contas*.`);
+      }
+    } else {
+      setPendenteSimulador(null);
+    }
+
+    setHistoricoChat(prev => [...prev, { autor: 'bot', texto: msgs.join('\n\n') }]);
   };
 
   const handleEnviarWhatsApp = async (e) => {
@@ -778,41 +973,77 @@ export default function App() {
     setProcessando(true);
 
     try {
-      // 1. Verifica resposta pendente de forma de pagamento
-      if (pendenteSimulador && pendenteSimulador.length > 0) {
-        let metodoResp = null;
-        let cartaoResp = null;
+      // MELHORIA 6: Comando "teste"
+      if (/^(teste|ping|status)$/i.test(txtLower)) {
+        setHistoricoChat(prev => [...prev, { 
+          autor: 'bot', 
+          texto: `🟢 *Conexão FinZap 100% Online!*\n• Status WhatsApp: *${whatsappStatus}*\n• Competência Ativa: *${filtroMesAno}*` 
+        }]);
+        setProcessando(false);
+        return;
+      }
 
-        for (const c of cartoes) {
-          if (txtLower.includes(c.nome.toLowerCase())) {
-            metodoResp = 'CREDITO';
-            cartaoResp = c.nome;
-            break;
-          }
-        }
-        if (!metodoResp) {
-          if (/crédito|credito|cartão|cartao/i.test(txtLower)) {
-            metodoResp = 'CREDITO';
-            cartaoResp = cartoes[0]?.nome || 'CREDITO';
-          } else if (/débito|debito/i.test(txtLower)) {
-            metodoResp = 'DEBITO';
-          } else if (/pix/i.test(txtLower)) {
-            metodoResp = 'PIX';
-          } else if (/dinheiro/i.test(txtLower)) {
-            metodoResp = 'DINHEIRO';
-          }
-        }
+      // 1. Verifica resposta pendente no Simulador (METODO, BANCO ou CATEGORIA)
+      if (pendenteSimulador && pendenteSimulador.itens) {
+        let atualizados = [...pendenteSimulador.itens];
 
-        if (metodoResp) {
-          const itensProntos = pendenteSimulador.map(it => ({
+        if (pendenteSimulador.etapa === 'METODO') {
+          let metodoResp = null;
+          let cartaoResp = null;
+          let bancoResp = null;
+
+          for (const c of cartoes) {
+            if (txtLower.includes(c.nome.toLowerCase())) {
+              metodoResp = 'CREDITO';
+              cartaoResp = c.nome;
+              break;
+            }
+          }
+          for (const b of bancos) {
+            if (txtLower.includes(b.nome.toLowerCase())) {
+              bancoResp = b.nome;
+              if (!metodoResp) metodoResp = /débito|debito/i.test(txtLower) ? 'DEBITO' : 'PIX';
+              break;
+            }
+          }
+          if (!metodoResp) {
+            if (/crédito|credito|cartão|cartao/i.test(txtLower)) {
+              metodoResp = 'CREDITO';
+              cartaoResp = cartoes[0]?.nome || 'CREDITO';
+            } else if (/débito|debito/i.test(txtLower)) metodoResp = 'DEBITO';
+            else if (/pix/i.test(txtLower)) metodoResp = 'PIX';
+            else if (/dinheiro/i.test(txtLower)) metodoResp = 'DINHEIRO';
+          }
+
+          if (metodoResp) {
+            atualizados = atualizados.map(it => ({
+              ...it,
+              metodo: metodoResp,
+              cartao_nome: cartaoResp,
+              banco_nome: bancoResp || it.banco_nome,
+              pago: true
+            }));
+            await verificarPendenciasSimulador(atualizados, pendenteSimulador.textoOriginal);
+            setProcessando(false);
+            return;
+          }
+        } else if (pendenteSimulador.etapa === 'BANCO') {
+          const bEnc = bancos.find(b => txtLower.includes(b.nome.toLowerCase())) || bancos[0];
+          if (bEnc) {
+            atualizados = atualizados.map(it => ({ ...it, banco_nome: bEnc.nome }));
+            await verificarPendenciasSimulador(atualizados, pendenteSimulador.textoOriginal);
+            setProcessando(false);
+            return;
+          }
+        } else if (pendenteSimulador.etapa === 'CATEGORIA') {
+          const cl = classificarCategoriaLocal(textoUsuario, false, categorias, subcategorias);
+          atualizados = atualizados.map(it => ({
             ...it,
-            metodo: metodoResp,
-            cartao_nome: cartaoResp,
-            pago: true
+            categoria: cl.categoria || textoUsuario,
+            subcategoria: cl.subcategoria || 'Geral',
+            precisaPerguntarCategoria: false
           }));
-          setPendenteSimulador(null);
-          const resps = await gravarItensSimulador(itensProntos, textoUsuario);
-          setHistoricoChat(prev => [...prev, { autor: 'bot', texto: resps.join('\n\n') }]);
+          await verificarPendenciasSimulador(atualizados, pendenteSimulador.textoOriginal);
           setProcessando(false);
           return;
         }
@@ -820,7 +1051,7 @@ export default function App() {
       }
 
       // 2. Comando Desfazer
-      if (/^(apagar|excluir|deletar|desfazer)/i.test(txtLower.trim())) {
+      if (/^(apagar|excluir|deletar|desfazer)/i.test(txtLower)) {
         if (transacoes.length === 0) {
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '⚠️ Nenhum lançamento para apagar.' }]);
           setProcessando(false);
@@ -869,42 +1100,7 @@ export default function App() {
         return;
       }
 
-      // 4. Consultas de Saldo e Cartão
-      const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite|posso gastar/i.test(txtLower) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLower);
-      if (isPergunta) {
-        const transMes = transacoes.filter(t => t.anoMes === filtroMesAno);
-        const cartaoPerguntado = cartoes.find(c => txtLower.includes(c.nome.toLowerCase()));
-        if (cartaoPerguntado) {
-          const faturaMes = transMes
-            .filter(t => t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase() && !t.fatura_paga)
-            .reduce((a, b) => a + Number(b.valor || 0), 0);
-          const compTotal = transacoes
-            .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cartaoPerguntado.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
-            .reduce((a, b) => a + Number(b.valor || 0), 0);
-          const disp = cartaoPerguntado.limite - compTotal;
-
-          setHistoricoChat(prev => [...prev, {
-            autor: 'bot',
-            texto: `💳 *Cartão ${cartaoPerguntado.nome} (${filtroMesAno})*\n\n` +
-                   `• Fatura do mês: *R$ ${faturaMes.toFixed(2)}*\n` +
-                   `• Limite disponível real: *R$ ${disp.toFixed(2)}*\n` +
-                   `• Melhor dia de compra: *Dia ${cartaoPerguntado.diaFechamento || 5}*`
-          }]);
-          setProcessando(false);
-          return;
-        }
-
-        const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false).reduce((a, b) => a + Number(b.valor || 0), 0);
-        const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA').reduce((a, b) => a + Number(b.valor || 0), 0);
-        setHistoricoChat(prev => [...prev, {
-          autor: 'bot',
-          texto: `📊 *Resumo FinZap (${filtroMesAno})*\n\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Resultado: R$ ${(rec - desp).toFixed(2)}*`
-        }]);
-        setProcessando(false);
-        return;
-      }
-
-      // 5. Lançamentos
+      // 4. Lançamentos
       const textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
       const partes = textoNormalizado.split(/(?:,|\s+e\s+|\s*;\s*|\n+)/i).map(p => p.trim()).filter(Boolean);
       const itensExtraidos = partes.map(interpretarItemUnico).filter(Boolean);
@@ -912,32 +1108,13 @@ export default function App() {
       if (itensExtraidos.length === 0) {
         setHistoricoChat(prev => [...prev, { 
           autor: 'bot', 
-          texto: '🤔 Não identifiquei valores. Tente:\n• "Água vence 25/10 valor 80,00"\n• "contas a vencer"\n• "contas proximas do vencimento"' 
+          texto: '🤔 Não identifiquei valores. Tente:\n• "comprei maçã 5,00 no débito"\n• "comprei lanche 35,00"\n• "teste"' 
         }]);
         setProcessando(false);
         return;
       }
 
-      const comMetodo = itensExtraidos.filter(i => i.metodo || i.pago === false);
-      const semMetodo = itensExtraidos.filter(i => !i.metodo && i.pago !== false);
-
-      let respostasFinais = [];
-
-      if (comMetodo.length > 0) {
-        const r = await gravarItensSimulador(comMetodo, textoUsuario);
-        respostasFinais.push(...r);
-      }
-
-      if (semMetodo.length > 0) {
-        setPendenteSimulador(semMetodo);
-        const listaStr = semMetodo.map(i => `• *${i.descricao}* [${i.categoria}] — R$ ${i.valorTotal.toFixed(2)}`).join('\n');
-        const nomesCartoes = cartoes.map(c => c.nome).join(', ');
-        respostasFinais.push(
-          `❓ *Qual foi a forma de pagamento?*\n${listaStr}\n\nResponda com: *Pix*, *Débito*, *Dinheiro* ou o cartão (*${nomesCartoes}*).`
-        );
-      }
-
-      setHistoricoChat(prev => [...prev, { autor: 'bot', texto: respostasFinais.join('\n\n') }]);
+      await verificarPendenciasSimulador(itensExtraidos, textoUsuario);
 
     } catch (error) {
       console.error(error);
@@ -1008,16 +1185,16 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS GERAIS, SALDOS POR CONTA, CARTÕES E EXTRATO DE MOVIMENTAÇÃO
+  // CÁLCULOS GERAIS, SALDOS POR CONTA (COM CHEQUE ESPECIAL), CARTÕES E EXTRATO
   // ==========================================================================
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
   
   const totalReceitas = transacoesFiltradas
-    .filter(t => t.tipo === 'RECEITA' && t.pago !== false)
+    .filter(t => t.tipo === 'RECEITA' && t.pago !== false && t.metodo !== 'TRANSFERENCIA')
     .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
   const totalDespesas = transacoesFiltradas
-    .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA')
+    .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
     .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
   const saldoAtual = totalReceitas - totalDespesas;
@@ -1030,7 +1207,7 @@ export default function App() {
   const projecaoDespesasMes = isMesAtual ? gastoMedioDiario * totalDiasNoMes : totalDespesas;
   const projecaoSaldoFimMes = totalReceitas - projecaoDespesasMes;
 
-  // Cálculo de Saldos de cada Conta Bancária
+  // Cálculo de Saldos de cada Conta Bancária + Detecção de Cheque Especial (Melhoria 3)
   const saldosPorBanco = bancos.map((b, index) => {
     const entradasBanco = transacoes
       .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
@@ -1045,7 +1222,8 @@ export default function App() {
       ...b,
       entradasBanco,
       saidasBanco,
-      saldoAtualConta
+      saldoAtualConta,
+      emChequeEspecial: saldoAtualConta < 0
     };
   });
 
@@ -1078,19 +1256,20 @@ export default function App() {
     };
   });
 
-  // Construção do Extrato de Movimentação (Incluindo Linha Consolidada da Fatura no Dia do Vencimento)
+  // Construção do Extrato de Movimentação (Incluindo Linha Consolidada da Fatura + Pagamentos de Fatura)
   const faturasConsolidadasNoExtrato = resumoCartoes
     .filter(c => c.faturaMes > 0)
     .map(c => {
       const diaVencStr = String(c.diaVencimento || 12).padStart(2, '0');
       return {
         id: `fatura-${c.id}-${filtroMesAno}`,
-        descricao: `Fatura Consolidada Cartão ${c.nome} (Vencimento)`,
+        descricao: `Fatura Consolidada Cartão ${c.nome} (Em Aberto no Vencimento)`,
         valor: c.faturaMes,
         tipo: 'FATURA_CARTAO',
         metodo: 'FATURA DO MÊS',
         cartao_nome: c.nome,
-        categoria: 'Fatura Cartão',
+        categoria: 'Contas',
+        subcategoria: 'Fatura Cartão',
         data_vencimento: `${filtroMesAno}-${diaVencStr}`,
         anoMes: filtroMesAno,
         pago: false,
@@ -1100,13 +1279,13 @@ export default function App() {
 
   const listaMovimentacaoExtrato = [...transacoesFiltradas, ...faturasConsolidadasNoExtrato]
     .filter(item => {
-      if (pesquisaExtrato && !item.descricao?.toLowerCase().includes(pesquisaExtrato.toLowerCase()) && !item.categoria?.toLowerCase().includes(pesquisaExtrato.toLowerCase())) {
+      if (pesquisaExtrato && !item.descricao?.toLowerCase().includes(pesquisaExtrato.toLowerCase()) && !item.categoria?.toLowerCase().includes(pesquisaExtrato.toLowerCase()) && !item.subcategoria?.toLowerCase().includes(pesquisaExtrato.toLowerCase())) {
         return false;
       }
       if (filtroTipoExtrato === 'RECEITA') return item.tipo === 'RECEITA';
       if (filtroTipoExtrato === 'DESPESA') return item.tipo === 'DESPESA' && item.metodo !== 'CREDITO';
       if (filtroTipoExtrato === 'CREDITO') return item.metodo === 'CREDITO';
-      if (filtroTipoExtrato === 'FATURA') return item.isLinhaFatura;
+      if (filtroTipoExtrato === 'FATURA') return item.isLinhaFatura || item.metodo === 'PAGAMENTO_FATURA';
       return true;
     })
     .sort((a, b) => (b.data_vencimento || '').localeCompare(a.data_vencimento || ''));
@@ -1117,7 +1296,7 @@ export default function App() {
 
   const listaContasVencerReceber = transacoesFiltradas
     .filter(t => {
-      if (t.metodo === 'CREDITO') return false;
+      if (t.metodo === 'CREDITO' || t.metodo === 'TRANSFERENCIA') return false;
       if (filtroVencNome && !t.descricao?.toLowerCase().includes(filtroVencNome.toLowerCase())) return false;
       if (filtroVencCat !== 'TODAS' && t.categoria !== filtroVencCat) return false;
       if (filtroVencStatus === 'ABERTO' && t.pago !== false) return false;
@@ -1136,7 +1315,7 @@ export default function App() {
 
   const despesasPorCategoria = categorias.map(cat => {
     const total = transacoesFiltradas
-      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA')
+      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
     return { name: cat, value: total };
   }).filter(item => item.value > 0);
@@ -1149,7 +1328,61 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col md:flex-row font-sans selection:bg-emerald-500 selection:text-slate-950">
       
-      {/* MODAL DE PAGAMENTO TOTAL OU PARCIAL DA FATURA */}
+      {/* MODAL DE DAR BAIXA EM CONTA ESCOLHENDO O BANCO (MELHORIA 8) */}
+      {modalBaixaConta && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-base text-slate-100 flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-emerald-400" /> Confirmar Baixa de Conta
+              </h3>
+              <button onClick={() => setModalBaixaConta(null)} className="text-slate-400 hover:text-slate-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={confirmarBaixaContaModal} className="space-y-4">
+              <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-xl">
+                <p className="text-sm font-bold text-slate-200">{modalBaixaConta.transacao.descricao}</p>
+                <p className="text-xs text-emerald-400 font-semibold mt-0.5">Valor: R$ {Number(modalBaixaConta.transacao.valor).toFixed(2)}</p>
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Forma de Pagamento</label>
+                <select
+                  value={modalBaixaConta.metodoEscolhido}
+                  onChange={e => setModalBaixaConta({ ...modalBaixaConta, metodoEscolhido: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                >
+                  <option value="PIX">PIX</option>
+                  <option value="DEBITO">Cartão de Débito</option>
+                  <option value="DINHEIRO">Dinheiro</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">De qual Conta Bancária vai sair/entrar?</label>
+                <select
+                  value={modalBaixaConta.bancoEscolhido}
+                  onChange={e => setModalBaixaConta({ ...modalBaixaConta, bancoEscolhido: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                >
+                  {saldosPorBanco.map(b => (
+                    <option key={b.id} value={b.nome}>{b.nome} (Saldo: R$ {b.saldoAtualConta.toFixed(2)})</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button type="submit" className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs">
+                  Confirmar e Dar Baixa
+                </button>
+                <button type="button" onClick={() => setModalBaixaConta(null)} className="px-4 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-xs">
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE PAGAMENTO TOTAL OU PARCIAL DA FATURA PERGUNTANDO A CONTA (MELHORIA 7 e 10) */}
       {modalPagarFatura && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
@@ -1198,19 +1431,25 @@ export default function App() {
               </div>
 
               <div>
-                <label className="text-xs text-slate-400 block mb-1">Descontar saldo de qual Conta Bancária?</label>
+                <label className="text-xs text-emerald-400 font-semibold block mb-1">
+                  🏦 De qual conta bancária vai debitar o pagamento?
+                </label>
                 <select
                   value={modalPagarFatura.bancoSaida}
                   onChange={e => setModalPagarFatura({ ...modalPagarFatura, bancoSaida: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                  className="w-full bg-slate-950 border border-emerald-500/40 rounded-xl px-3.5 py-2.5 text-sm text-slate-100"
                 >
-                  {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                  {saldosPorBanco.map(b => (
+                    <option key={b.id} value={b.nome}>
+                      {b.nome} (Saldo atual: R$ {b.saldoAtualConta.toFixed(2)})
+                    </option>
+                  ))}
                 </select>
               </div>
 
               <div className="flex gap-2 pt-2">
                 <button type="submit" className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs">
-                  Confirmar Pagamento
+                  Confirmar e Lançar no Extrato
                 </button>
                 <button type="button" onClick={() => setModalPagarFatura(null)} className="px-4 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-xs">
                   Cancelar
@@ -1221,7 +1460,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO DE LANÇAMENTO */}
+      {/* MODAL DE EDIÇÃO DE LANÇAMENTO (COM CATEGORIA E SUBCATEGORIA) */}
       {transacaoEditando && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
@@ -1265,21 +1504,26 @@ export default function App() {
                   <label className="text-xs text-slate-400 block mb-1">Categoria</label>
                   <select 
                     value={transacaoEditando.categoria}
-                    onChange={e => setTransacaoEditando({ ...transacaoEditando, categoria: e.target.value })}
+                    onChange={e => {
+                      const novaC = e.target.value;
+                      const subsDaNova = subcategorias[novaC] || ['Geral'];
+                      setTransacaoEditando({ ...transacaoEditando, categoria: novaC, subcategoria: subsDaNova[0] });
+                    }}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
                   >
                     {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs text-slate-400 block mb-1">Status</label>
+                  <label className="text-xs text-slate-400 block mb-1">Subcategoria</label>
                   <select 
-                    value={transacaoEditando.pago ? 'PAGO' : 'ABERTO'}
-                    onChange={e => setTransacaoEditando({ ...transacaoEditando, pago: e.target.value === 'PAGO' })}
+                    value={transacaoEditando.subcategoria || 'Geral'}
+                    onChange={e => setTransacaoEditando({ ...transacaoEditando, subcategoria: e.target.value })}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
                   >
-                    <option value="PAGO">Pago / Recebido</option>
-                    <option value="ABERTO">Em Aberto (A Vencer)</option>
+                    {(subcategorias[transacaoEditando.categoria] || ['Geral']).map(sub => (
+                      <option key={sub} value={sub}>{sub}</option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -1335,7 +1579,7 @@ export default function App() {
         </div>
       )}
 
-      {/* SIDEBAR MODERNA (COM AS NOVAS ABAS SOLICITADAS) */}
+      {/* SIDEBAR MODERNA */}
       <aside className="w-full md:w-72 bg-slate-900/50 backdrop-blur-xl border-r border-slate-800/80 p-6 flex flex-col justify-between">
         <div>
           <div className="flex items-center gap-3.5 mb-8">
@@ -1367,8 +1611,13 @@ export default function App() {
                 </span>
               )}
             </button>
-            <button onClick={() => setAbaAtiva('saldos')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'saldos' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
-              <Wallet className="w-4 h-4" /> Saldos das Contas
+            <button onClick={() => setAbaAtiva('saldos')} className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'saldos' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
+              <span className="flex items-center gap-3">
+                <Wallet className="w-4 h-4" /> Saldos & Transferências
+              </span>
+              {saldosPorBanco.some(b => b.emChequeEspecial) && (
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" title="Conta em Cheque Especial!"></span>
+              )}
             </button>
             <button onClick={() => setAbaAtiva('cartoes')} className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'cartoes' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <span className="flex items-center gap-3">
@@ -1382,7 +1631,7 @@ export default function App() {
               <Landmark className="w-4 h-4" /> Cadastro Bancos/Cartões
             </button>
             <button onClick={() => setAbaAtiva('categorias')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'categorias' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
-              <FolderPlus className="w-4 h-4" /> Categorias & Limites
+              <FolderPlus className="w-4 h-4" /> Categorias & Subcategorias
             </button>
             <button onClick={() => setAbaAtiva('whatsapp')} className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-medium transition ${abaAtiva === 'whatsapp' ? 'bg-emerald-500 text-slate-950 font-semibold shadow-lg shadow-emerald-500/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>
               <span className="flex items-center gap-3">
@@ -1408,6 +1657,44 @@ export default function App() {
       <main className="flex-1 p-6 md:p-8 overflow-y-auto grid grid-cols-1 lg:grid-cols-3 gap-8 bg-slate-950">
         
         <div className="lg:col-span-2 space-y-6">
+
+          {/* MELHORIA 5: SELETOR GLOBAL DE MÊS VISÍVEL EM TODAS AS ABAS COM SETAS RÁPIDAS */}
+          <div className="bg-slate-900/70 backdrop-blur-xl border border-slate-800/80 p-3.5 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-3 shadow-xl">
+            <div className="flex items-center gap-2 text-slate-200 text-xs font-semibold">
+              <Calendar className="w-4 h-4 text-emerald-400" />
+              <span>Competência Financeira Ativa:</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button 
+                type="button" onClick={() => alterarMesCompetencia(-1)}
+                className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-xl text-slate-300 transition"
+                title="Mês Anterior"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <input 
+                type="month" 
+                value={filtroMesAno} 
+                onChange={e => setFiltroMesAno(e.target.value)} 
+                className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-1.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-emerald-500 transition"
+              />
+              <button 
+                type="button" onClick={() => alterarMesCompetencia(1)}
+                className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-xl text-slate-300 transition"
+                title="Próximo Mês"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+              {filtroMesAno !== mesAtualStr && (
+                <button 
+                  type="button" onClick={() => setFiltroMesAno(mesAtualStr)}
+                  className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-1.5 rounded-xl font-semibold"
+                >
+                  Mês Atual
+                </button>
+              )}
+            </div>
+          </div>
 
           {/* BANNER DE ALERTA: WHATSAPP DESCONECTADO */}
           {whatsappStatus !== 'CONNECTED' && (
@@ -1436,6 +1723,26 @@ export default function App() {
             </div>
           )}
 
+          {/* MELHORIA 3: BANNER DE ALERTA DE USO DO CHEQUE ESPECIAL (SALDO NEGATIVO) */}
+          {saldosPorBanco.filter(b => b.emChequeEspecial).map(b => (
+            <div key={b.id} className="p-4 rounded-2xl border bg-rose-500/15 border-rose-500/50 flex items-center justify-between gap-4 shadow-xl">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 animate-pulse" />
+                <div>
+                  <h4 className="text-xs font-bold uppercase text-rose-300">
+                    🚨 Alerta de Cheque Especial — Conta {b.nome}
+                  </h4>
+                  <p className="text-xs text-slate-200 mt-0.5">
+                    O saldo da conta <strong>{b.nome}</strong> está negativo em <strong className="text-rose-400">R$ {b.saldoAtualConta.toFixed(2)}</strong>. Faça uma transferência para cobrir a conta!
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setAbaAtiva('saldos')} className="text-xs font-semibold underline text-rose-200 whitespace-nowrap">
+                Transferir Saldo
+              </button>
+            </div>
+          ))}
+
           {/* BANNER DE ALERTA DE LIMITE DE CARTÃO DE CRÉDITO */}
           {resumoCartoes.filter(c => c.alerta80).map(c => (
             <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between gap-4 shadow-xl ${c.estourado ? 'bg-rose-500/10 border-rose-500/40' : 'bg-amber-500/10 border-amber-500/30'}`}>
@@ -1461,22 +1768,9 @@ export default function App() {
           ================================================================ */}
           {abaAtiva === 'dashboard' && (
             <>
-              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-4 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-4 shadow-xl">
-                <div className="flex items-center gap-2.5 text-slate-200 text-sm font-medium">
-                  <Calendar className="w-4 h-4 text-emerald-400" />
-                  <span>Competência Financeira:</span>
-                </div>
-                <input 
-                  type="month" 
-                  value={filtroMesAno} 
-                  onChange={e => setFiltroMesAno(e.target.value)} 
-                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-emerald-400 font-semibold focus:outline-none focus:border-emerald-500 transition"
-                />
-              </div>
-
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
-                  <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado do Mês</span>
+                  <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Resultado de {filtroMesAno}</span>
                   <p className={`text-2xl font-bold mt-1.5 tracking-tight ${saldoAtual >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                     R$ {saldoAtual.toFixed(2)}
                   </p>
@@ -1502,14 +1796,16 @@ export default function App() {
                     <BrainCircuit className="w-4 h-4 text-emerald-400" /> Diagnóstico & Saldos Rápidos
                   </h2>
                   <button onClick={() => setAbaAtiva('saldos')} className="text-xs text-emerald-400 hover:underline">
-                    Ver Saldos por Banco →
+                    Transferir / Ver Saldos →
                   </button>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Saldo Geral em Contas</span>
-                    <p className="text-lg font-bold text-emerald-400 mt-1">R$ {saldoTotalBancos.toFixed(2)}</p>
+                    <p className={`text-lg font-bold mt-1 ${saldoTotalBancos >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      R$ {saldoTotalBancos.toFixed(2)}
+                    </p>
                     <p className="text-[11px] text-slate-400 mt-1.5">
                       Soma de {bancos.length} conta(s) bancária(s)
                     </p>
@@ -1544,7 +1840,7 @@ export default function App() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   {categorias.filter(cat => cat !== 'Receita').map(cat => {
                     const gastoCat = transacoesFiltradas
-                      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA')
+                      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
                       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
                     
                     const limite = orcamentos[cat] || 0;
@@ -1625,23 +1921,17 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 2: MOVIMENTAÇÃO (EXTRATO BANCÁRIO + FATURA NO DIA DO VENCIMENTO)
+              ABA 2: MOVIMENTAÇÃO (EXTRATO + PAGAMENTO DE FATURA + SUBCATEGORIA)
           ================================================================ */}
           {abaAtiva === 'movimentacao' && (
             <div className="space-y-6">
-              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
-                <div>
-                  <h2 className="text-lg font-bold flex items-center gap-2">
-                    <FileText className="w-5 h-5 text-emerald-400" /> Extrato de Movimentação ({filtroMesAno})
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Entradas, saídas, compras no cartão e o valor total da fatura projetado no dia do vencimento.
-                  </p>
-                </div>
-                <input 
-                  type="month" value={filtroMesAno} onChange={e => setFiltroMesAno(e.target.value)} 
-                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-emerald-400 font-semibold"
-                />
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-emerald-400" /> Extrato de Movimentação ({filtroMesAno})
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Entradas, saídas, transferências, pagamentos de fatura e a projeção da fatura no dia do vencimento.
+                </p>
               </div>
 
               {/* BARRA DE PESQUISA E FILTROS DO EXTRATO */}
@@ -1649,7 +1939,7 @@ export default function App() {
                 <div className="relative">
                   <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3" />
                   <input 
-                    type="text" placeholder="Pesquisar por descrição ou categoria no extrato..."
+                    type="text" placeholder="Pesquisar por descrição, categoria ou subcategoria..."
                     value={pesquisaExtrato} onChange={e => setPesquisaExtrato(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
                   />
@@ -1660,7 +1950,7 @@ export default function App() {
                     { id: 'RECEITA', label: '🟢 Entradas' },
                     { id: 'DESPESA', label: '🔴 Saídas (Pix/Débito)' },
                     { id: 'CREDITO', label: '💳 Compras no Crédito' },
-                    { id: 'FATURA', label: '📅 Faturas no Dia do Vencimento' }
+                    { id: 'FATURA', label: '📅 Faturas & Pagamentos de Fatura' }
                   ].map(f => (
                     <button
                       key={f.id} onClick={() => setFiltroTipoExtrato(f.id)}
@@ -1683,18 +1973,22 @@ export default function App() {
                       className={`flex items-center justify-between p-4 rounded-xl border transition ${
                         item.isLinhaFatura 
                           ? 'bg-amber-500/10 border-amber-500/40' 
-                          : 'bg-slate-950/70 border-slate-800/80'
+                          : item.metodo === 'PAGAMENTO_FATURA'
+                            ? 'bg-sky-500/10 border-sky-500/40'
+                            : 'bg-slate-950/70 border-slate-800/80'
                       }`}
                     >
                       <div className="flex items-center gap-3.5">
                         <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
                           item.isLinhaFatura 
                             ? 'bg-amber-500/20 text-amber-400' 
-                            : item.tipo === 'RECEITA' 
-                              ? 'bg-emerald-500/10 text-emerald-400' 
-                              : 'bg-rose-500/10 text-rose-400'
+                            : item.metodo === 'PAGAMENTO_FATURA'
+                              ? 'bg-sky-500/20 text-sky-400'
+                              : item.tipo === 'RECEITA' 
+                                ? 'bg-emerald-500/10 text-emerald-400' 
+                                : 'bg-rose-500/10 text-rose-400'
                         }`}>
-                          {item.isLinhaFatura ? <CreditCard className="w-4 h-4" /> : item.tipo === 'RECEITA' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                          {item.isLinhaFatura || item.metodo === 'PAGAMENTO_FATURA' ? <CreditCard className="w-4 h-4" /> : item.tipo === 'RECEITA' ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
                         </div>
                         <div>
                           <p className="font-semibold text-sm text-slate-100 flex items-center gap-2 flex-wrap">
@@ -1704,6 +1998,11 @@ export default function App() {
                                 TOTAL DA FATURA NO VENCIMENTO
                               </span>
                             )}
+                            {item.metodo === 'PAGAMENTO_FATURA' && (
+                              <span className="text-[10px] bg-sky-500 text-slate-950 font-bold px-2 py-0.5 rounded-full">
+                                PAGAMENTO DE FATURA
+                              </span>
+                            )}
                             {!item.isLinhaFatura && item.pago === false && (
                               <span className="text-[10px] bg-rose-500/20 text-rose-300 border border-rose-500/30 px-2 py-0.5 rounded-full">
                                 Em Aberto
@@ -1711,7 +2010,7 @@ export default function App() {
                             )}
                           </p>
                           <p className="text-xs text-slate-400 mt-0.5">
-                            Data/Venc: <strong>{formatarDataBR(item.data_vencimento)}</strong> • {item.categoria} • <span className="text-slate-300">{item.cartao_nome || item.banco_nome || item.metodo}</span>
+                            Data: <strong>{formatarDataBR(item.data_vencimento)}</strong> • <span className="text-emerald-400 font-medium">{item.categoria} &gt; {item.subcategoria || 'Geral'}</span> • <span className="text-slate-300">{item.cartao_nome ? `Cartão ${item.cartao_nome}` : `${item.metodo} (${item.banco_nome || 'Geral'})`}</span>
                           </p>
                         </div>
                       </div>
@@ -1739,7 +2038,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 3: CONTAS A VENCER & A RECEBER (COM FILTROS E ALERTAS WHATSAPP)
+              ABA 3: CONTAS A VENCER & A RECEBER
           ================================================================ */}
           {abaAtiva === 'vencimentos' && (
             <div className="space-y-6">
@@ -1750,14 +2049,14 @@ export default function App() {
                       <Clock className="w-5 h-5 text-amber-400" /> Lançar Conta a Vencer ou Valor a Receber
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Pelo WhatsApp basta enviar: <em>"Água vence 25/10 valor 80,00"</em> ou perguntar <em>"contas a vencer"</em>.
+                      Pelo WhatsApp envie: <em>"Água vence 25/10 valor 80,00"</em> ou dê baixa enviando <em>"paguei a água no pix Itaú"</em>.
                     </p>
                   </div>
                   <button 
                     onClick={dispararTesteAlertaWhatsApp}
                     className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
                   >
-                    <BellRing className="w-3.5 h-3.5" /> Testar Alerta de Hoje no WhatsApp
+                    <BellRing className="w-3.5 h-3.5" /> Testar Alerta no WhatsApp
                   </button>
                 </div>
 
@@ -1787,7 +2086,10 @@ export default function App() {
                   </select>
                   <select 
                     value={formAgendamento.categoria}
-                    onChange={e => setFormAgendamento({ ...formAgendamento, categoria: e.target.value })}
+                    onChange={e => {
+                      const c = e.target.value;
+                      setFormAgendamento({ ...formAgendamento, categoria: c, subcategoria: (subcategorias[c] || ['Geral'])[0] });
+                    }}
                     className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
                     {categorias.map(cat => <option key={cat} value={cat}>{cat}</option>)}
@@ -1843,10 +2145,10 @@ export default function App() {
                             {t.tipo === 'RECEITA' ? 'A RECEBER' : 'A PAGAR'}
                           </span>
                           <p className="font-semibold text-sm text-slate-100">{t.descricao}</p>
-                          <span className="text-xs text-slate-400">({t.categoria})</span>
+                          <span className="text-xs text-emerald-400">({t.categoria} &gt; {t.subcategoria || 'Geral'})</span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1">
-                          Vencimento: <strong className="text-amber-300">{formatarDataBR(t.data_vencimento)}</strong> • Status: <strong>{t.pago ? 'Pago / Recebido' : 'Em Aberto'}</strong>
+                          Vencimento: <strong className="text-amber-300">{formatarDataBR(t.data_vencimento)}</strong> • Status: <strong>{t.pago ? `Pago (${t.banco_nome || t.metodo})` : 'Em Aberto'}</strong>
                         </p>
                       </div>
 
@@ -1855,7 +2157,7 @@ export default function App() {
                           R$ {Number(t.valor || 0).toFixed(2)}
                         </span>
                         <button
-                          onClick={() => alternarStatusPago(t)}
+                          onClick={() => clicarDarBaixaConta(t)}
                           className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition ${
                             t.pago 
                               ? 'bg-slate-800 text-emerald-400 hover:bg-slate-700' 
@@ -1876,15 +2178,12 @@ export default function App() {
                 )}
               </div>
 
-              {/* LEMBRETES FIXOS RECORRENTES TODO MÊS (EX: DIA 15 ENERGIA) */}
+              {/* LEMBRETES FIXOS RECORRENTES TODO MÊS */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <div>
                   <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                     <BellRing className="w-4 h-4 text-emerald-400" /> Lembretes Fixos Mensais no WhatsApp (Ex: Todo dia 15 Energia)
                   </h3>
-                  <p className="text-xs text-slate-400">
-                    Contas que se repetem todo mês e disparam aviso no WhatsApp no dia do vencimento se ainda não constarem pagas.
-                  </p>
                 </div>
                 <form onSubmit={adicionarContaFixa} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                   <input type="text" placeholder="Nome (ex: Energia)" value={fixaNome} onChange={e => setFixaNome(e.target.value)} className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-slate-200" />
@@ -1920,16 +2219,18 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 4: SALDOS DAS CONTAS BANCÁRIAS
+              ABA 4: SALDOS DAS CONTAS BANCÁRIAS & TRANSFERÊNCIAS (MELHORIA 1 e 3)
           ================================================================ */}
           {abaAtiva === 'saldos' && (
             <div className="space-y-6">
               <div className="bg-gradient-to-r from-emerald-950/40 via-slate-900 to-slate-900 border border-emerald-500/30 p-6 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
                 <div>
                   <span className="text-xs uppercase font-bold tracking-wider text-emerald-400">Patrimônio Líquido Disponível</span>
-                  <h2 className="text-3xl font-bold text-slate-100 mt-1">R$ {saldoTotalBancos.toFixed(2)}</h2>
+                  <h2 className={`text-3xl font-bold mt-1 ${saldoTotalBancos >= 0 ? 'text-slate-100' : 'text-rose-400'}`}>
+                    R$ {saldoTotalBancos.toFixed(2)}
+                  </h2>
                   <p className="text-xs text-slate-400 mt-1">
-                    Calculado a partir do Saldo Inicial + Entradas Recebidas - Saídas Efetivadas de cada conta.
+                    Calculado a partir do Saldo Inicial + Entradas - Saídas (incluindo transferências e faturas pagas).
                   </p>
                 </div>
                 <button 
@@ -1940,13 +2241,63 @@ export default function App() {
                 </button>
               </div>
 
+              {/* FORMULÁRIO DE TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS */}
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
+                <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                  <ArrowRightLeft className="w-4 h-4 text-sky-400" /> Transferência entre Contas Bancárias
+                </h3>
+                <form onSubmit={realizarTransferenciaEntreContas} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">Saiu de (Origem)</label>
+                    <select
+                      value={formTransferencia.bancoOrigem}
+                      onChange={e => setFormTransferencia({ ...formTransferencia, bancoOrigem: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    >
+                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">Entrou em (Destino)</label>
+                    <select
+                      value={formTransferencia.bancoDestino}
+                      onChange={e => setFormTransferencia({ ...formTransferencia, bancoDestino: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    >
+                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">Valor (R$)</label>
+                    <input
+                      type="number" step="0.01" required placeholder="0,00"
+                      value={formTransferencia.valor}
+                      onChange={e => setFormTransferencia({ ...formTransferencia, valor: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button type="submit" className="w-full bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
+                      🔄 Transferir Agora
+                    </button>
+                  </div>
+                </form>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {saldosPorBanco.map(b => (
-                  <div key={b.id} className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
+                  <div key={b.id} className={`backdrop-blur-xl border p-5 rounded-2xl space-y-4 shadow-xl ${b.emChequeEspecial ? 'bg-rose-950/20 border-rose-500/50' : 'bg-slate-900/60 border-slate-800/80'}`}>
                     <div className="flex justify-between items-start">
                       <div>
                         <span className="text-[10px] uppercase font-bold text-sky-400">{b.tipo}</span>
-                        <h3 className="text-lg font-bold text-slate-100">{b.nome}</h3>
+                        <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                          {b.nome}
+                          {b.emChequeEspecial && (
+                            <span className="text-[10px] bg-rose-500 text-slate-950 font-bold px-2 py-0.5 rounded-full">
+                              CHEQUE ESPECIAL
+                            </span>
+                          )}
+                        </h3>
                       </div>
                       <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center">
                         <Landmark className="w-5 h-5" />
@@ -1981,26 +2332,19 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 5: CARTÃO DE CRÉDITO COMPLETA (FATURAS + MODAL TOTAL/PARCIAL)
+              ABA 5: CARTÃO DE CRÉDITO COMPLETA
           ================================================================ */}
           {abaAtiva === 'cartoes' && (
             <div className="space-y-6">
-              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
-                <div>
-                  <h2 className="text-lg font-bold flex items-center gap-2">
-                    <CreditCard className="w-5 h-5 text-emerald-400" /> Cartões de Crédito & Faturas
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Pague o valor total ou parcial da fatura, acompanhe o melhor dia de compra e o limite disponível real.
-                  </p>
-                </div>
-                <input 
-                  type="month" value={filtroMesAno} onChange={e => setFiltroMesAno(e.target.value)} 
-                  className="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-emerald-400 font-semibold"
-                />
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                  <CreditCard className="w-5 h-5 text-emerald-400" /> Cartões de Crédito & Faturas ({filtroMesAno})
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Pague o valor total ou parcial escolhendo de qual banco debitar, acompanhe o melhor dia de compra e o limite real.
+                </p>
               </div>
 
-              {/* CARDS INDIVIDUAIS DE CADA CARTÃO DE CRÉDITO */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {resumoCartoes.map(c => (
                   <div key={c.id} className={`p-5 rounded-2xl border space-y-4 shadow-xl transition ${c.estourado ? 'bg-rose-950/20 border-rose-500/40' : c.alerta80 ? 'bg-amber-950/15 border-amber-500/40' : 'bg-slate-900/60 border-slate-800/80'}`}>
@@ -2059,12 +2403,12 @@ export default function App() {
                 ))}
               </div>
 
-              {/* LANÇAR COMPRA PARCELADA */}
+              {/* LANÇAR COMPRA PARCELADA COM CATEGORIA E SUBCATEGORIA */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                   <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra no Cartão (À Vista ou Parcelada)
                 </h3>
-                <form onSubmit={lancarCompraCartaoManual} className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+                <form onSubmit={lancarCompraCartaoManual} className="grid grid-cols-1 sm:grid-cols-6 gap-3">
                   <input 
                     type="text" required placeholder="Descrição (ex: Micro-ondas)" value={novaCompraCartao.descricao}
                     onChange={e => setNovaCompraCartao({ ...novaCompraCartao, descricao: e.target.value })}
@@ -2087,18 +2431,30 @@ export default function App() {
                   <select 
                     value={novaCompraCartao.cartaoNome}
                     onChange={e => setNovaCompraCartao({ ...novaCompraCartao, cartaoNome: e.target.value })}
-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
                     {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
                   </select>
                   <select 
                     value={novaCompraCartao.categoria}
-                    onChange={e => setNovaCompraCartao({ ...novaCompraCartao, categoria: e.target.value })}
+                    onChange={e => {
+                      const cat = e.target.value;
+                      setNovaCompraCartao({ ...novaCompraCartao, categoria: cat, subcategoria: (subcategorias[cat] || ['Geral'])[0] });
+                    }}
                     className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
                     {categorias.filter(c => c !== 'Receita').map(cat => <option key={cat} value={cat}>{cat}</option>)}
                   </select>
-                  <button type="submit" className="sm:col-span-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
+                  <select 
+                    value={novaCompraCartao.subcategoria}
+                    onChange={e => setNovaCompraCartao({ ...novaCompraCartao, subcategoria: e.target.value })}
+                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                  >
+                    {(subcategorias[novaCompraCartao.categoria] || ['Geral']).map(sub => (
+                      <option key={sub} value={sub}>{sub}</option>
+                    ))}
+                  </select>
+                  <button type="submit" className="sm:col-span-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
                     Lançar na Fatura
                   </button>
                 </form>
@@ -2139,7 +2495,7 @@ export default function App() {
                             <span className="text-[10px] bg-slate-800 text-emerald-400 px-2 py-0.5 rounded-md font-bold">{t.cartao_nome}</span>
                             {t.fatura_paga && <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full">Fatura Quitada</span>}
                           </p>
-                          <p className="text-xs text-slate-400">{t.categoria}</p>
+                          <p className="text-xs text-slate-400">{t.categoria} &gt; {t.subcategoria || 'Geral'}</p>
                         </div>
                         <div className="flex items-center gap-3">
                           <span className={`font-bold text-sm ${Number(t.valor) < 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -2164,7 +2520,6 @@ export default function App() {
           ================================================================ */}
           {abaAtiva === 'bancos' && (
             <div className="space-y-6">
-              {/* CADASTRO / EDIÇÃO DE CARTÕES DE CRÉDITO */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-5 shadow-xl">
                 <div>
                   <h2 className="text-lg font-bold flex items-center gap-2">
@@ -2246,7 +2601,7 @@ export default function App() {
                     <Landmark className="w-5 h-5 text-sky-400" /> {bancoForm.id ? 'Editar Conta Bancária' : 'Cadastrar Bancos & Contas'}
                   </h2>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Defina o nome da conta e o saldo inicial para acompanhar na aba "Saldos das Contas".
+                    Defina o nome da conta e o saldo inicial para acompanhar na aba "Saldos & Transferências".
                   </p>
                 </div>
 
@@ -2310,48 +2665,73 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 7: CATEGORIAS & LIMITES
+              ABA 7: CATEGORIAS, SUBCATEGORIAS & LIMITES (MELHORIA 9)
           ================================================================ */}
           {abaAtiva === 'categorias' && (
             <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-6 shadow-xl">
               <div>
-                <h2 className="text-lg font-bold">Categorias & Orçamentos</h2>
-                <p className="text-xs text-slate-400 mt-0.5">Gerencie categorias e defina limites mensais para receber alertas.</p>
+                <h2 className="text-lg font-bold">Categorias, Subcategorias & Orçamentos</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  O robô classifica automaticamente itens como <em>"maçã"</em> em <strong>Alimentação &gt; Mercado</strong> e <em>"lanche"</em> em <strong>Alimentação &gt; Lazer</strong>.
+                </p>
               </div>
-              <form onSubmit={adicionarCategoria} className="flex gap-3">
-                <input type="text" placeholder="Nome da Categoria (ex: Pet)" value={novaCatNome} onChange={e => setNovaCatNome(e.target.value)} className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" />
-                <button type="submit" className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-5 py-3 rounded-xl font-semibold text-sm flex items-center gap-2"><Plus className="w-4 h-4" /> Adicionar</button>
-              </form>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <form onSubmit={adicionarCategoria} className="flex gap-2">
+                  <input type="text" placeholder="Nova Categoria (ex: Educação)" value={novaCatNome} onChange={e => setNovaCatNome(e.target.value)} className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200" />
+                  <button type="submit" className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 px-4 py-2.5 rounded-xl font-semibold text-xs">+ Categoria</button>
+                </form>
+
+                <form onSubmit={adicionarSubcategoria} className="flex gap-2">
+                  <select 
+                    value={catSelecionadaParaSub} onChange={e => setCatSelecionadaParaSub(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-200"
+                  >
+                    {categorias.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <input type="text" placeholder="Nova Subcategoria" value={novaSubNome} onChange={e => setNovaSubNome(e.target.value)} className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200" />
+                  <button type="submit" className="bg-sky-500 hover:bg-sky-400 text-slate-950 px-4 py-2.5 rounded-xl font-semibold text-xs">+ Sub</button>
+                </form>
+              </div>
 
               <form onSubmit={definirOrcamento} className="flex flex-col sm:flex-row gap-3 pt-4 border-t border-slate-800/80">
                 <select 
                   value={orcamentoCat} onChange={e => setOrcamentoCat(e.target.value)}
-                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200"
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200"
                 >
-                  <option value="">Selecione para definir limite</option>
+                  <option value="">Selecione a Categoria para definir limite mensal</option>
                   {categorias.filter(c => c !== 'Receita').map(c => (
                     <option key={c} value={c}>{c}</option>
                   ))}
                 </select>
                 <input 
-                  type="number" placeholder="Limite (R$)" value={orcamentoValor} onChange={e => setOrcamentoValor(e.target.value)} 
-                  className="w-full sm:w-44 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200" 
+                  type="number" placeholder="Limite Mensal (R$)" value={orcamentoValor} onChange={e => setOrcamentoValor(e.target.value)} 
+                  className="w-full sm:w-44 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-slate-200" 
                 />
-                <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-3 rounded-xl font-semibold text-sm transition">
+                <button type="submit" className="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl font-semibold text-xs transition">
                   Salvar Limite
                 </button>
               </form>
 
-              <div className="space-y-2.5">
+              <div className="space-y-3">
                 {categorias.map(cat => (
-                  <div key={cat} className="flex items-center justify-between bg-slate-950/60 border border-slate-800 px-4 py-3.5 rounded-xl text-sm">
-                    <div>
-                      <span className="font-medium text-slate-200">{cat}</span>
-                      <span className="text-xs text-slate-400 ml-3">
-                        {orcamentos[cat] ? `Limite: R$ ${orcamentos[cat].toFixed(2)}` : 'Sem limite definido'}
-                      </span>
+                  <div key={cat} className="bg-slate-950/60 border border-slate-800 p-4 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-sm text-slate-100">{cat}</span>
+                        <span className="text-xs text-emerald-400 ml-3 font-medium">
+                          {orcamentos[cat] ? `Limite: R$ ${orcamentos[cat].toFixed(2)}` : 'Sem limite definido'}
+                        </span>
+                      </div>
+                      <button onClick={() => excluirCategoria(cat)} className="text-slate-600 hover:text-rose-400"><Trash2 className="w-4 h-4" /></button>
                     </div>
-                    <button onClick={() => excluirCategoria(cat)} className="text-slate-600 hover:text-rose-400"><Trash2 className="w-4 h-4" /></button>
+                    <div className="flex gap-1.5 flex-wrap">
+                      {(subcategorias[cat] || ['Geral']).map(sub => (
+                        <span key={sub} className="text-[11px] bg-slate-900 border border-slate-800 text-slate-300 px-2.5 py-1 rounded-lg">
+                          {cat} &gt; <strong>{sub}</strong>
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -2369,7 +2749,9 @@ export default function App() {
               
               <div>
                 <h2 className="text-xl font-bold">Conexão WhatsApp</h2>
-                <p className="text-xs text-slate-400 mt-1">Leia o QR Code abaixo com o seu WhatsApp para ativar os lançamentos e alertas automáticos.</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  O robô responde exclusivamente quando você envia mensagens para o seu próprio número (conversa "Você mesmo"). Envie <strong>"teste"</strong> no seu WhatsApp para validar!
+                </p>
               </div>
 
               <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl flex flex-col items-center justify-center min-h-[260px]">
@@ -2413,7 +2795,7 @@ export default function App() {
             </div>
             <div>
               <h3 className="font-bold text-sm text-emerald-300">Simulador do WhatsApp</h3>
-              <p className="text-xs text-emerald-500/80 font-medium">Vencimentos, Perguntas & Gastos</p>
+              <p className="text-xs text-emerald-500/80 font-medium">Subcategorias, Bancos & Comandos</p>
             </div>
           </div>
 
@@ -2433,15 +2815,14 @@ export default function App() {
           </div>
 
           <div className="p-2.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2 overflow-x-auto">
-            <button type="button" onClick={() => setMsgWhats('Água vence 25/10 valor 85,00')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">📅 Agendar 25/10</button>
-            <button type="button" onClick={() => setMsgWhats('Gastei 45,00 na padaria')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">❓ Sem método</button>
-            <button type="button" onClick={() => setMsgWhats('contas a vencer')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">📋 "contas a vencer"</button>
-            <button type="button" onClick={() => setMsgWhats('contas proximas do vencimento')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-rose-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">⏳ "próximas 5 dias"</button>
+            <button type="button" onClick={() => setMsgWhats('comprei maçã 5,00 no débito')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-emerald-400 border border-emerald-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">🍎 "maçã 5 no débito"</button>
+            <button type="button" onClick={() => setMsgWhats('comprei um lanche 35,00 no pix Itaú')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-amber-400 border border-amber-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">🍔 "lanche 35 pix Itaú"</button>
+            <button type="button" onClick={() => setMsgWhats('teste')} className="text-[11px] bg-slate-950 hover:bg-slate-800 text-sky-400 border border-slate-800 px-3 py-1.5 rounded-xl whitespace-nowrap">🟢 "teste"</button>
           </div>
 
           <form onSubmit={handleEnviarWhatsApp} className="p-3.5 bg-slate-900/80 border-t border-slate-800/80 flex gap-2.5">
             <input 
-              type="text" placeholder="Ex: Água vence 25/10 valor 80,00..." value={msgWhats} onChange={e => setMsgWhats(e.target.value)} 
+              type="text" placeholder="Ex: comprei maçã 5,00 no débito..." value={msgWhats} onChange={e => setMsgWhats(e.target.value)} 
               className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-slate-200 focus:outline-none focus:border-emerald-500" 
             />
             <button type="submit" className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 p-3 rounded-xl transition flex items-center justify-center">
