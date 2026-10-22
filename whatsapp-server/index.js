@@ -34,7 +34,6 @@ const formatarDataBR = (isoDate) => {
   return `${d}/${m}/${a}`;
 };
 
-// Envio seguro com cache para evitar o aviso "Aguardando mensagem"
 async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   const msgEnviada = await sock.sendMessage(remoteJid, conteudo);
   if (msgEnviada?.key?.id && msgEnviada?.message) {
@@ -47,7 +46,7 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   return msgEnviada;
 }
 
-// Rota principal leve para o cron-job.org
+// Rota principal leve para o cron-job.org nunca dar "output too large"[cite: 7, 8, 9]
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
   res.status(200).send('OK');
@@ -202,7 +201,7 @@ async function useFirestoreAuthState(userId) {
 }
 
 // ============================================================================
-// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM DETEÇÃO CORRETA DE @LID E PRÓPRIO NÚMERO)
+// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM GETMESSAGE ANTI-FALHA DE CIFRA)
 // ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
@@ -275,7 +274,6 @@ async function startWhatsAppForUser(userId) {
 
       const remoteJid = msg.key.remoteJid || '';
 
-      // 1. Ignora grupos, listas de transmissão e canais
       if (remoteJid.endsWith('@g.us') || remoteJid.includes('broadcast') || remoteJid.includes('newsletter')) return;
 
       const texto = (
@@ -288,7 +286,6 @@ async function startWhatsAppForUser(userId) {
 
       if (!texto) return;
 
-      // 2. Filtro anti-loop de mensagens enviadas pelo próprio robô
       if (
         texto.startsWith('✅') || 
         texto.startsWith('📊') || 
@@ -305,25 +302,19 @@ async function startWhatsAppForUser(userId) {
         texto.startsWith('⏳') ||
         texto.startsWith('🏦') ||
         texto.startsWith('🔄') ||
-        texto.startsWith('🟢')
+        texto.startsWith('🟢') ||
+        texto.startsWith('🧠')
       ) return;
 
-      // 3. Verificação inteligente do chat "Mensagens para mim" (suporta @s.whatsapp.net e @lid)
       const meuNumero = (sock.user?.id || state.creds?.me?.id || '').split(':')[0].split('@')[0];
       const meuLid = (sock.user?.lid || state.creds?.me?.lid || '').split(':')[0].split('@')[0];
       const destinoNumero = remoteJid.split(':')[0].split('@')[0];
 
-      // No WhatsApp Multi-Device, mensagens enviadas para terceiros usam @s.whatsapp.net com o telefone da outra pessoa.
-      // Já o chat "Mensagens para mim" usa ou o seu próprio número (@s.whatsapp.net) ou o identificador @lid da sua própria conta!
       const isChatComOutraPessoa = remoteJid.endsWith('@s.whatsapp.net') && meuNumero && destinoNumero !== meuNumero;
       const isOutroLid = remoteJid.endsWith('@lid') && meuLid && destinoNumero !== meuLid;
 
-      if (isChatComOutraPessoa || isOutroLid) {
-        console.log(`🔒 Ignorando mensagem enviada para terceiro: ${remoteJid}`);
-        return;
-      }
+      if (isChatComOutraPessoa || isOutroLid) return;
 
-      console.log(`📩 Mensagem recebida no chat pessoal (${remoteJid}): "${texto}"`);
       userJids.set(userId, remoteJid);
       await processarMensagemInteligente(userId, texto, sock, remoteJid);
     });
@@ -423,7 +414,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 setInterval(() => verificarAlertasVencimento(false), 30 * 60 * 1000);
 
 // ============================================================================
-// 5. EXTRAÇÃO INTELIGENTE DE DATA E DE CATEGORIA + SUBCATEGORIA
+// 5. EXTRAÇÃO INTELIGENTE DE DATA E DE CATEGORIA + MOTOR DE APRENDIZADO
 // ============================================================================
 function extrairDataVencimento(texto) {
   const hoje = new Date();
@@ -457,6 +448,35 @@ function extrairDataVencimento(texto) {
   return null;
 }
 
+// Consulta a memória de aprendizado adaptativa no Firestore
+async function consultarRegraAprendida(userId, descricaoItem) {
+  try {
+    const descLimpa = semAcento(descricaoItem).trim();
+    const regrasSnap = await db.collection('users').doc(userId).collection('regras_aprendidas').get();
+    
+    for (const docRegra of regrasSnap.docs) {
+      const data = docRegra.data();
+      if (descLimpa.includes(semAcento(data.termo))) {
+        return { categoria: data.categoria, subcategoria: data.subcategoria };
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function salvarRegraAprendida(userId, termo, categoria, subcategoria) {
+  try {
+    const termoLimpo = semAcento(termo).trim();
+    if (!termoLimpo || termoLimpo.length < 2) return;
+    await db.collection('users').doc(userId).collection('regras_aprendidas').doc(termoLimpo).set({
+      termo: termoLimpo,
+      categoria,
+      subcategoria,
+      atualizadoEm: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (e) {}
+}
+
 function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategoriasMap = {}) {
   if (isReceita) {
     if (/salario|pagamento|pro-labore|adiantamento/i.test(pLimpo)) {
@@ -465,17 +485,17 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Receita', subcategoria: 'Vendas / Extras', reconhecida: true };
   }
 
-  // 1. Alimentação > Mercado (Frutas como laranja e maçã, hortifruti, supermercado, carnes)
+  // Alimentação > Mercado
   if (/mercado|supermercado|atacadao|assai|tenda|compras|feira|acougue|hortifruti|laranja|maca|banana|uva|morango|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|peixe|ovo|leite|pao|queijo|presunto|manteiga|oleo|azeite|acucar|sal|sabao|detergente|papel higienico/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
 
-  // 2. Alimentação > Lazer (Lanches, Restaurantes, Delivery, Cafés, Bares)
+  // Alimentação > Lazer
   if (/lanche|hamburguer|burger|pizza|pizzaria|restaurante|ifood|padaria|almoco|jantar|cafe|sorvete|acai|pastel|salgado|churrasco|barzinho|bebida|cerveja|refrigerante|suco|doceria|bolo|chocolate/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
   }
 
-  // 3. Transporte
+  // Transporte
   if (/uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio/i.test(pLimpo)) {
     return { categoria: 'Transporte', subcategoria: 'Apps / Pedágio', reconhecida: true };
   }
@@ -486,7 +506,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Transporte', subcategoria: 'Manutenção / Veículo', reconhecida: true };
   }
 
-  // 4. Lazer
+  // Lazer
   if (/cinema|passeio|parque|show|ingresso|viagem|hotel|pousada|shopping|jogo|game|brinquedo/i.test(pLimpo)) {
     return { categoria: 'Lazer', subcategoria: 'Passeios', reconhecida: true };
   }
@@ -494,7 +514,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Lazer', subcategoria: 'Streaming', reconhecida: true };
   }
 
-  // 5. Contas
+  // Contas
   if (/luz|energia|agua|sabesp|gas|internet|wifi|telefone|celular|vivo|claro|tim|aluguel|condominio|iptu|boleto|imposto|mei|das|contador|escola|faculdade|curso|farmacia|remedio|medico|consulta|exame|dentista/i.test(pLimpo)) {
     if (/luz|energia|agua|gas|internet|telefone|celular|aluguel|condominio|iptu/i.test(pLimpo)) {
       return { categoria: 'Contas', subcategoria: 'Casa / Fixas', reconhecida: true };
@@ -521,7 +541,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
 }
 
 // ============================================================================
-// 6. GRAVAÇÃO NO FIRESTORE + CÁLCULO PRECISO DE LIMITE E CHEQUE ESPECIAL
+// 6. GRAVAÇÃO NO FIRESTORE + ALERTAS DE CARTÃO E CHEQUE ESPECIAL
 // ============================================================================
 async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
   const hoje = new Date();
@@ -537,6 +557,9 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
     const isAgendado = item.pago === false;
     const catFinal = item.categoria || 'Outros';
     const subFinal = item.subcategoria || 'Geral';
+
+    // Grava a regra aprendida no Firestore
+    await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
 
     for (let i = 0; i < parcelasTotal; i++) {
       let anoMesItem = item.anoMes || anoMesPadrao;
@@ -579,28 +602,23 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         `📅 *Conta Lançada (${item.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n` +
         `• *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
         `• Valor: *R$ ${valorParcela.toFixed(2)}*\n` +
-        `• Vencimento: *${formatarDataBR(item.data_vencimento)}* (Status: Em Aberto)`
+        `• Vencimento: *${formatarDataBR(item.data_vencimento)}*`
       );
       continue;
     }
 
     let alertasExtras = '';
 
-    // 1. Alerta de Limite de Categoria
     const limiteCat = Number(orcamentos[catFinal] || 0);
     if (limiteCat > 0 && item.tipo === 'DESPESA') {
       const gastoCatMes = todasTransacoes
         .filter(t => t.anoMes === anoMesPadrao && t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(catFinal) && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
         .reduce((a, b) => a + Number(b.valor || 0), 0);
       const pctCat = Math.round((gastoCatMes / limiteCat) * 100);
-      if (pctCat >= 100) {
-        alertasExtras += `\n🚨 *Limite da Categoria ${catFinal} Estourado!* (${pctCat}% usado)`;
-      } else if (pctCat >= 80) {
-        alertasExtras += `\n⚠️ *Atenção:* Categoria ${catFinal} chegou a ${pctCat}% do limite.`;
-      }
+      if (pctCat >= 100) alertasExtras += `\n🚨 *Limite da Categoria ${catFinal} Estourado!* (${pctCat}%)`;
+      else if (pctCat >= 80) alertasExtras += `\n⚠️ *Atenção:* Categoria ${catFinal} em ${pctCat}%.`;
     }
 
-    // 2. Alerta de Limite do Cartão de Crédito
     if (item.metodo === 'CREDITO' && item.cartao_nome) {
       const objCartao = cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome));
       if (objCartao && Number(objCartao.limite) > 0) {
@@ -612,17 +630,12 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         const disponivel = limiteTotal - gastoAcumuladoCartao;
         const pctCartao = Math.round((gastoAcumuladoCartao / limiteTotal) * 100);
 
-        if (pctCartao >= 100) {
-          alertasExtras += `\n🚨 *ALERTA DE CARTÃO:* O limite do *${objCartao.nome}* estourou! (${pctCartao}% utilizado | Excedido em R$ ${Math.abs(disponivel).toFixed(2)})`;
-        } else if (pctCartao >= 80) {
-          alertasExtras += `\n⚠️ *Alerta de Limite (${objCartao.nome}):* ${pctCartao}% do limite comprometido! Restam *R$ ${disponivel.toFixed(2)}* disponíveis.`;
-        } else {
-          alertasExtras += `\n💳 _Limite disponível no ${objCartao.nome}: R$ ${disponivel.toFixed(2)}_`;
-        }
+        if (pctCartao >= 100) alertasExtras += `\n🚨 *ALERTA:* O limite do *${objCartao.nome}* estourou!`;
+        else if (pctCartao >= 80) alertasExtras += `\n⚠️ *Alerta de Limite (${objCartao.nome}):* ${pctCartao}% comprometido!`;
+        else alertasExtras += `\n💳 _Disponível no ${objCartao.nome}: R$ ${disponivel.toFixed(2)}_`;
       }
     }
 
-    // 3. Alerta de Uso do Cheque Especial (Saldo Negativo na Conta Bancária)
     if (item.metodo !== 'CREDITO' && item.banco_nome) {
       const idxBanco = bancos.findIndex(b => semAcento(b.nome) === semAcento(item.banco_nome));
       if (idxBanco !== -1) {
@@ -636,22 +649,18 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         const saldoAtualBanco = Number(bObj.saldoInicial || 0) + entB - saiB;
 
         if (saldoAtualBanco < 0) {
-          alertasExtras += `\n🚨 *ALERTA DE CHEQUE ESPECIAL:* A conta *${bObj.nome}* entrou no negativo! Saldo atual: *R$ ${saldoAtualBanco.toFixed(2)}*`;
+          alertasExtras += `\n🚨 *ALERTA DE CHEQUE ESPECIAL:* Conta *${bObj.nome}* negativa (R$ ${saldoAtualBanco.toFixed(2)})!`;
         } else {
-          alertasExtras += `\n🏦 _Saldo restante no ${bObj.nome}: R$ ${saldoAtualBanco.toFixed(2)}_`;
+          alertasExtras += `\n🏦 _Saldo no ${bObj.nome}: R$ ${saldoAtualBanco.toFixed(2)}_`;
         }
       }
     }
 
-    const origemPagamento = item.metodo === 'CREDITO'
-      ? `Cartão ${item.cartao_nome}`
-      : item.banco_nome
-        ? `${item.metodo} (${item.banco_nome})`
-        : item.metodo;
+    const origemPagamento = item.metodo === 'CREDITO' ? `Cartão ${item.cartao_nome}` : item.banco_nome ? `${item.metodo} (${item.banco_nome})` : item.metodo;
 
     respostas.push(
-      `✅ *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
-      `💰 R$ ${valorParcela.toFixed(2)} ${parcelasTotal > 1 ? `(${parcelasTotal}x de R$ ${valorParcela.toFixed(2)})` : ''} • ${origemPagamento}${alertasExtras}`
+      `🧠 *[Aprendido]* ✅ *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
+      `💰 R$ ${valorParcela.toFixed(2)} • ${origemPagamento}${alertasExtras}`
     );
   }
 
@@ -659,7 +668,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 }
 
 // ============================================================================
-// 7. FILA DE PENDÊNCIAS: PERGUNTA FORMA DE PAGAMENTO -> QUAL BANCO -> CATEGORIA
+// 7. FILA DE PENDÊNCIAS COM CONSULTA PRÉVIA DE REGRAS APRENDIDAS
 // ============================================================================
 async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
   const userRef = db.collection('users').doc(userId);
@@ -668,6 +677,13 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
   const pendentes = [];
 
   for (const item of itens) {
+    const regraSalva = await consultarRegraAprendida(userId, item.descricao);
+    if (regraSalva) {
+      item.categoria = regraSalva.categoria;
+      item.subcategoria = regraSalva.subcategoria;
+      item.precisaPerguntarCategoria = false;
+    }
+
     const precisaMetodo = !item.metodo && item.pago !== false;
     const precisaBanco = (item.metodo === 'PIX' || item.metodo === 'DEBITO') && !item.banco_nome && item.pago !== false;
     const precisaCategoria = !item.categoria || item.precisaPerguntarCategoria;
@@ -705,16 +721,13 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
       etapa = 'BANCO';
       const opcoesBancos = bancos.map(b => b.nome).join(' ou ');
       textoPergunta =
-        `🏦 *De qual conta bancária saiu esse ${primeiro.metodo}?*\n${resumoPendentes}\n\n` +
+        `🏦 *De qual conta bancária vai sair esse ${primeiro.metodo}?*\n${resumoPendentes}\n\n` +
         `Responda com o nome do banco: *${opcoesBancos}*`;
     } else {
       etapa = 'CATEGORIA';
       textoPergunta =
         `📂 *Em qual Categoria e Subcategoria deseja lançar?*\n${resumoPendentes}\n\n` +
-        `Exemplos de resposta:\n` +
-        `• *Mercado* (vai para Alimentação > Mercado)\n` +
-        `• *Lazer* (vai para Alimentação > Lazer)\n` +
-        `• *Transporte* ou *Contas*`;
+        `Exemplos: *Mercado*, *Lazer*, *Transporte* ou *Contas*. O robô vai gravar para as próximas vezes!`;
     }
 
     await userRef.set({
@@ -744,24 +757,10 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const userRef = db.collection('users').doc(userId);
     const userDoc = await userRef.get();
     const userData = userDoc.data() || {};
-    const cartoes = userData.cartoes || [
-      { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12 },
-      { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17 }
-    ];
-    const bancos = userData.bancos || [
-      { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 1500 },
-      { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
-    ];
+    const cartoes = userData.cartoes || [];
+    const bancos = userData.bancos || [{ id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente' }, { id: 'b2', nome: 'Nubank Conta', tipo: 'Digital' }];
     const categorias = userData.categorias || ['Alimentação', 'Mercado', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros'];
-    const subcategorias = userData.subcategorias || {
-      'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Delivery'],
-      'Mercado': ['Supermercado', 'Hortifruti', 'Açougue'],
-      'Transporte': ['Combustível', 'Apps / Pedágio', 'Manutenção'],
-      'Lazer': ['Passeios', 'Streaming', 'Viagens'],
-      'Contas': ['Casa / Fixas', 'Saúde / Farmácia', 'Boletos / Serviços'],
-      'Receita': ['Salário', 'Vendas / Extras'],
-      'Outros': ['Geral']
-    };
+    const subcategorias = userData.subcategorias || {};
     const orcamentos = userData.orcamentos || {};
     const pendente = userData.pendente_pagamento || null;
 
@@ -770,30 +769,19 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
     const hojeStr = hoje.toISOString().split('T')[0];
 
-    // ------------------------------------------------------------------------
-    // COMANDO "TESTE" PARA VERIFICAR SE A CONEXÃO ESTÁ OK
-    // ------------------------------------------------------------------------
-    if (/^(teste|testar|ping|status|conexao|ta funcionando|esta funcionando)$/i.test(txtLimpo)) {
+    if (/^(teste|ping|status)$/i.test(txtLimpo)) {
       await enviarMensagemSegura(sock, remoteJid, {
-        text: `🟢 *Conexão FinZap 100% Online!*\n\n` +
-              `• Status do Bot: *Conectado e Operacional*\n` +
-              `• Chat Identificado: *${remoteJid}*\n` +
-              `• Competência Ativa: *${anoMesAtual}*`
+        text: `🟢 *FinZap 100% Online com Aprendizado Adaptativo!*\n• Competência: ${anoMesAtual}`
       });
       return;
     }
 
-    // ------------------------------------------------------------------------
-    // MODO -1: TRATAMENTO DE RESPOSTAS PENDENTES (METODO -> BANCO -> CATEGORIA)
-    // ------------------------------------------------------------------------
-    // IMPORTANTE: Se o utilizador enviar uma frase nova com números/valores (ex: "Laranja 10,00"),
-    // cancela a pendência antiga e processa o novo lançamento normalmente!
     const pareceNovoLancamento = /[a-zA-ZÀ-ÿ]+\s+\d+[,\.]?\d*/.test(textoUsuario) && !/\b(x|vezes|parcelas)\b/i.test(txtLimpo);
 
     if (pendente && !pareceNovoLancamento) {
-      if (/^(cancelar|esquecer|nao|abortar)$/i.test(txtLimpo)) {
+      if (/^(cancelar|esquecer|nao)$/i.test(txtLimpo)) {
         await userRef.set({ pendente_pagamento: null }, { merge: true });
-        await enviarMensagemSegura(sock, remoteJid, { text: '🗑️ Operação pendente cancelada.' });
+        await enviarMensagemSegura(sock, remoteJid, { text: '🗑️ Cancelado.' });
         return;
       }
 
@@ -802,9 +790,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         if (bancoEscolhido) {
           if (pendente.etapa === 'PAGAR_FATURA_BANCO') {
             const { cartaoNome, valorFatura } = pendente;
-            const snapFatura = await db.collection('users').doc(userId).collection('transacoes')
-              .where('anoMes', '==', anoMesAtual)
-              .get();
+            const snapFatura = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
 
             const batch = db.batch();
             snapFatura.docs.forEach(d => {
@@ -832,12 +818,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             });
 
             await userRef.set({ pendente_pagamento: null }, { merge: true });
-            await enviarMensagemSegura(sock, remoteJid, {
-              text: `✅ *Fatura do cartão ${cartaoNome} paga com sucesso!*\n` +
-                    `💰 Valor: *R$ ${Number(valorFatura).toFixed(2)}*\n` +
-                    `🏦 Debitado da conta: *${bancoEscolhido.nome}*\n` +
-                    `📊 _O pagamento já consta no seu Extrato de Movimentação e o limite foi liberado._`
-            });
+            await enviarMensagemSegura(sock, remoteJid, { text: `✅ *Fatura ${cartaoNome} paga com sucesso via ${bancoEscolhido.nome}!*` });
             return;
           }
 
@@ -850,12 +831,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
               data_pagamento: hojeStr
             });
             await userRef.set({ pendente_pagamento: null }, { merge: true });
-            await enviarMensagemSegura(sock, remoteJid, {
-              text: `✅ *Baixa de Conta Efetivada!*\n` +
-                    `• Conta: *${descricao}*\n` +
-                    `• Valor: *R$ ${Number(valor).toFixed(2)}*\n` +
-                    `• Debitado de: *${bancoEscolhido.nome}* (${metodo || 'PIX'})`
-            });
+            await enviarMensagemSegura(sock, remoteJid, { text: `✅ *Baixa efetivada em ${descricao} (${bancoEscolhido.nome})!*` });
             return;
           }
         }
@@ -865,92 +841,59 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         let itensAtualizados = [...pendente.itens];
 
         if (pendente.etapa === 'METODO') {
-          let metodoEscolhido = null;
-          let cartaoEscolhido = null;
-          let bancoEscolhido = null;
+          let metodoResp = null;
+          let cartaoResp = null;
+          let bancoResp = null;
 
           for (const c of cartoes) {
-            if (txtLimpo.includes(semAcento(c.nome))) {
-              metodoEscolhido = 'CREDITO';
-              cartaoEscolhido = c.nome;
-              break;
-            }
+            if (txtLimpo.includes(semAcento(c.nome))) { metodoResp = 'CREDITO'; cartaoResp = c.nome; break; }
           }
-
           for (const b of bancos) {
             if (txtLimpo.includes(semAcento(b.nome))) {
-              bancoEscolhido = b.nome;
-              if (!metodoEscolhido) {
-                metodoEscolhido = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
-              }
+              bancoResp = b.nome;
+              if (!metodoResp) metodoResp = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
               break;
             }
           }
-
-          if (!metodoEscolhido) {
-            if (/credito|cartao/i.test(txtLimpo)) {
-              metodoEscolhido = 'CREDITO';
-              cartaoEscolhido = cartoes[0]?.nome || 'CREDITO';
-            } else if (/debito/i.test(txtLimpo)) {
-              metodoEscolhido = 'DEBITO';
-            } else if (/pix/i.test(txtLimpo)) {
-              metodoEscolhido = 'PIX';
-            } else if (/dinheiro|especie/i.test(txtLimpo)) {
-              metodoEscolhido = 'DINHEIRO';
-            }
+          if (!metodoResp) {
+            if (/credito|cartao/i.test(txtLimpo)) { metodoResp = 'CREDITO'; cartaoResp = cartoes[0]?.nome || 'CREDITO'; }
+            else if (/debito/i.test(txtLimpo)) metodoResp = 'DEBITO';
+            else if (/pix/i.test(txtLimpo)) metodoResp = 'PIX';
+            else if (/dinheiro/i.test(txtLimpo)) metodoResp = 'DINHEIRO';
           }
 
-          if (metodoEscolhido) {
-            const matchParcelasResp = txtLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
-            const parcelasResp = matchParcelasResp ? parseInt(matchParcelasResp[1]) : null;
-
-            itensAtualizados = itensAtualizados.map(it => {
-              const pTotal = parcelasResp || it.parcelasTotal || 1;
-              const vParc = pTotal > 1 ? Number((it.valorTotal / pTotal).toFixed(2)) : it.valorTotal;
-              return {
-                ...it,
-                parcelasTotal: pTotal,
-                valorParcela: vParc,
-                metodo: metodoEscolhido,
-                cartao_nome: cartaoEscolhido,
-                banco_nome: metodoEscolhido === 'CREDITO' ? null : (bancoEscolhido || it.banco_nome || null),
-                pago: true
-              };
-            });
-
-            await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
-            return;
-          }
-        } else if (pendente.etapa === 'BANCO') {
-          const bancoObj = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos.find(b => semAcento(b.nome).includes(txtLimpo));
-          if (bancoObj) {
+          if (metodoResp) {
             itensAtualizados = itensAtualizados.map(it => ({
               ...it,
-              banco_nome: bancoObj.nome
+              metodo: metodoResp,
+              cartao_nome: cartaoResp,
+              banco_nome: metodoResp === 'CREDITO' ? null : (bancoResp || it.banco_nome || null),
+              pago: true
             }));
             await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
             return;
           }
+        } else if (pendente.etapa === 'BANCO') {
+          const bancoObj = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos[0];
+          if (bancoObj) {
+            itensAtualizados = itensAtualizados.map(it => ({ ...it, banco_nome: bancoObj.nome }));
+            await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
+            return;
+          }
         } else if (pendente.etapa === 'CATEGORIA') {
+          const itemAlvo = itensAtualizados[0];
           const classif = classificarCategoriaESubcategoria(txtLimpo, false, categorias, subcategorias);
-          let catResp = classif.categoria;
-          let subResp = classif.subcategoria;
+          const catFinal = classif.categoria || textoUsuario.trim();
+          const subFinal = classif.subcategoria || 'Geral';
 
-          if (!catResp) {
-            if (textoUsuario.includes('>')) {
-              const [c, s] = textoUsuario.split('>').map(x => x.trim());
-              catResp = c;
-              subResp = s || 'Geral';
-            } else {
-              catResp = textoUsuario.trim();
-              subResp = 'Geral';
-            }
+          if (itemAlvo) {
+            await salvarRegraAprendida(userId, itemAlvo.descricao, catFinal, subFinal);
           }
 
           itensAtualizados = itensAtualizados.map(it => ({
             ...it,
-            categoria: catResp,
-            subcategoria: subResp,
+            categoria: catFinal,
+            subcategoria: subFinal,
             precisaPerguntarCategoria: false
           }));
 
@@ -960,9 +903,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
     }
 
-    // ------------------------------------------------------------------------
-    // TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS PELO WHATSAPP
-    // ------------------------------------------------------------------------
+    // Transferência entre contas
     if (/transferir|transferencia|transferi|passei.*para/i.test(txtLimpo)) {
       const textoNormTransf = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
       const matchVal = textoNormTransf.match(/(\d+\.\d{2}|\d+)/);
@@ -973,18 +914,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
         for (const b of bancos) {
           const nomeB = semAcento(b.nome);
-          const regexOrigem = new RegExp(`(?:do|da|de)\\s+${nomeB}`, 'i');
-          const regexDestino = new RegExp(`(?:para|pro|pra|no|na)\\s+${nomeB}`, 'i');
-          if (regexOrigem.test(txtLimpo)) bancoOrigem = b.nome;
-          if (regexDestino.test(txtLimpo)) bancoDestino = b.nome;
+          if (new RegExp(`(?:do|da|de)\\s+${nomeB}`, 'i').test(txtLimpo)) bancoOrigem = b.nome;
+          if (new RegExp(`(?:para|pro|pra|no|na)\\s+${nomeB}`, 'i').test(txtLimpo)) bancoDestino = b.nome;
         }
 
         if (!bancoOrigem || !bancoDestino) {
           const encontrados = bancos.filter(b => txtLimpo.includes(semAcento(b.nome)));
-          if (encontrados.length >= 2) {
-            bancoOrigem = encontrados[0].nome;
-            bancoDestino = encontrados[1].nome;
-          }
+          if (encontrados.length >= 2) { bancoOrigem = encontrados[0].nome; bancoDestino = encontrados[1].nome; }
         }
 
         if (bancoOrigem && bancoDestino && valorTransf > 0) {
@@ -1018,459 +954,140 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             criadoEm: admin.firestore.FieldValue.serverTimestamp()
           });
 
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `🔄 *Transferência Realizada com Sucesso!*\n\n` +
-                  `• Origem: *${bancoOrigem}* (- R$ ${valorTransf.toFixed(2)})\n` +
-                  `• Destino: *${bancoDestino}* (+ R$ ${valorTransf.toFixed(2)})\n` +
-                  `• Data: *${formatarDataBR(hojeStr)}*`
-          });
+          await enviarMensagemSegura(sock, remoteJid, { text: `🔄 *Transferência de R$ ${valorTransf.toFixed(2)} de ${bancoOrigem} para ${bancoDestino} realizada!*` });
           return;
         }
       }
     }
 
-    // ------------------------------------------------------------------------
-    // DAR BAIXA EM CONTAS EM ABERTO OU PAGAR FATURA PELO WHATSAPP
-    // ------------------------------------------------------------------------
+    // Dar baixa em contas pelo WhatsApp
     const isComandoBaixa = /^(paguei|dar baixa|baixa|quitei|pagar fatura)/i.test(txtLimpo) && !/\b\d+[,\.]\d{2}\b/.test(textoUsuario);
     if (isComandoBaixa) {
-      const snapMes = await db.collection('users').doc(userId).collection('transacoes')
-        .where('anoMes', '==', anoMesAtual)
-        .get();
+      const snapMes = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
       const transMes = snapMes.docs.map(d => ({ id: d.id, ...d.data() }));
-
       const bancoInformado = bancos.find(b => txtLimpo.includes(semAcento(b.nome)));
 
       if (/fatura/i.test(txtLimpo)) {
         const cartaoAlvo = cartoes.find(c => txtLimpo.includes(semAcento(c.nome))) || cartoes[0];
         if (cartaoAlvo) {
-          const itensFatura = transMes.filter(
-            t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoAlvo.nome) && !t.fatura_paga
-          );
+          const itensFatura = transMes.filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoAlvo.nome) && !t.fatura_paga);
           const totalFatura = itensFatura.reduce((a, b) => a + Number(b.valor || 0), 0);
-
           if (totalFatura <= 0) {
-            await enviarMensagemSegura(sock, remoteJid, { text: `✅ A fatura do cartão *${cartaoAlvo.nome}* em ${anoMesAtual} já consta como paga!` });
+            await enviarMensagemSegura(sock, remoteJid, { text: `✅ Fatura de ${cartaoAlvo.nome} já paga!` });
             return;
           }
-
           if (!bancoInformado) {
-            const listaBancos = bancos.map(b => b.nome).join(' ou ');
-            await userRef.set({
-              pendente_pagamento: {
-                etapa: 'PAGAR_FATURA_BANCO',
-                cartaoNome: cartaoAlvo.nome,
-                valorFatura: totalFatura,
-                criadoEm: Date.now()
-              }
-            }, { merge: true });
-
-            await enviarMensagemSegura(sock, remoteJid, {
-              text: `💳 *Pagamento da Fatura ${cartaoAlvo.nome} (R$ ${totalFatura.toFixed(2)})*\n\n` +
-                    `🏦 *De qual conta bancária vai debitar o valor?*\nResponda com: *${listaBancos}*`
-            });
+            await userRef.set({ pendente_pagamento: { etapa: 'PAGAR_FATURA_BANCO', cartaoNome: cartaoAlvo.nome, valorFatura: totalFatura, criadoEm: Date.now() } }, { merge: true });
+            await enviarMensagemSegura(sock, remoteJid, { text: `🏦 *De qual banco vai debitar a fatura do ${cartaoAlvo.nome} (R$ ${totalFatura.toFixed(2)})?*\nResponda com: *${bancos.map(b => b.nome).join(' ou ')}*.` });
             return;
           }
-
-          const batch = db.batch();
-          snapMes.docs.forEach(d => {
-            const dt = d.data();
-            if (dt.tipo === 'DESPESA' && semAcento(dt.cartao_nome) === semAcento(cartaoAlvo.nome) && !dt.fatura_paga) {
-              batch.update(d.ref, { fatura_paga: true });
-            }
-          });
-          await batch.commit();
-
-          await db.collection('users').doc(userId).collection('transacoes').add({
-            descricao: `Pagamento Fatura Cartão ${cartaoAlvo.nome}`,
-            valor: totalFatura,
-            tipo: 'DESPESA',
-            metodo: 'PAGAMENTO_FATURA',
-            cartao_nome: null,
-            banco_nome: bancoInformado.nome,
-            categoria: 'Contas',
-            subcategoria: 'Fatura Cartão',
-            pago: true,
-            data_vencimento: hojeStr,
-            anoMes: anoMesAtual,
-            origem: 'WHATSAPP_IA',
-            criadoEm: admin.firestore.FieldValue.serverTimestamp()
-          });
-
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `✅ *Fatura ${cartaoAlvo.nome} paga com sucesso!*\n💰 Valor: R$ ${totalFatura.toFixed(2)} debitado de *${bancoInformado.nome}*.`
-          });
-          return;
         }
       }
 
       const contasAbertas = transMes.filter(t => t.pago === false);
-      const contaEncontrada = contasAbertas.find(t => {
-        const descLimpa = semAcento(t.descricao);
-        return txtLimpo.includes(descLimpa) || descLimpa.split(' ').some(palavra => palavra.length > 2 && txtLimpo.includes(palavra));
-      });
-
+      const contaEncontrada = contasAbertas.find(t => txtLimpo.includes(semAcento(t.descricao)));
       if (contaEncontrada) {
         const metodoBaixa = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
         if (!bancoInformado) {
-          const listaBancos = bancos.map(b => b.nome).join(' ou ');
-          await userRef.set({
-            pendente_pagamento: {
-              etapa: 'BAIXA_CONTA_BANCO',
-              docId: contaEncontrada.id,
-              descricao: contaEncontrada.descricao,
-              valor: contaEncontrada.valor,
-              metodo: metodoBaixa,
-              criadoEm: Date.now()
-            }
-          }, { merge: true });
-
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `🏦 *Dar baixa em: ${contaEncontrada.descricao} (R$ ${Number(contaEncontrada.valor).toFixed(2)})*\n\n` +
-                  `De qual conta bancária saiu o pagamento?\nResponda com: *${listaBancos}*`
-          });
+          await userRef.set({ pendente_pagamento: { etapa: 'BAIXA_CONTA_BANCO', docId: contaEncontrada.id, descricao: contaEncontrada.descricao, valor: contaEncontrada.valor, metodo: metodoBaixa, criadoEm: Date.now() } }, { merge: true });
+          await enviarMensagemSegura(sock, remoteJid, { text: `🏦 *De qual banco vai sair o pagamento de ${contaEncontrada.descricao}?*\nResponda com: *${bancos.map(b => b.nome).join(' ou ')}*.` });
           return;
         }
-
-        await db.collection('users').doc(userId).collection('transacoes').doc(contaEncontrada.id).update({
-          pago: true,
-          metodo: metodoBaixa,
-          banco_nome: bancoInformado.nome,
-          data_pagamento: hojeStr
-        });
-
-        await enviarMensagemSegura(sock, remoteJid, {
-          text: `✅ *Baixa realizada com sucesso!*\n• *${contaEncontrada.descricao}* — R$ ${Number(contaEncontrada.valor).toFixed(2)}\n• Debitado de: *${bancoInformado.nome}* (${metodoBaixa})`
-        });
-        return;
       }
     }
 
-    // ------------------------------------------------------------------------
-    // MODO 0: DESFAZER / APAGAR ÚLTIMO LANÇAMENTO
-    // ------------------------------------------------------------------------
+    // Desfazer
     const isDesfazer = /^(apagar|excluir|deletar|remover|desfazer|cancelar)\s*(ultimo|ultima|lancamento|gasto)?$/i.test(txtLimpo);
-
     if (isDesfazer) {
-      const ultimoSnap = await db.collection('users').doc(userId).collection('transacoes')
-        .orderBy('criadoEm', 'desc')
-        .limit(1)
-        .get();
-
-      if (ultimoSnap.empty) {
-        await enviarMensagemSegura(sock, remoteJid, { text: '⚠️ Nenhum lançamento encontrado para apagar.' });
+      const ultimoSnap = await db.collection('users').doc(userId).collection('transacoes').orderBy('criadoEm', 'desc').limit(1).get();
+      if (!ultimoSnap.empty) {
+        await ultimoSnap.docs[0].ref.delete();
+        await enviarMensagemSegura(sock, remoteJid, { text: '🗑️ Último lançamento removido!' });
         return;
       }
+    }
 
-      const docRecente = ultimoSnap.docs[0];
-      const dadosRecentes = docRecente.data();
-
-      if (dadosRecentes.mensagem_original) {
-        const loteSnap = await db.collection('users').doc(userId).collection('transacoes')
-          .where('mensagem_original', '==', dadosRecentes.mensagem_original)
-          .get();
-
-        const tempoBase = dadosRecentes.criadoEm?.toMillis ? dadosRecentes.criadoEm.toMillis() : Date.now();
-        const docsParaApagar = loteSnap.docs.filter(d => {
-          const t = d.data().criadoEm?.toMillis ? d.data().criadoEm.toMillis() : tempoBase;
-          return Math.abs(tempoBase - t) < 120000;
-        });
-
-        if (docsParaApagar.length > 1) {
-          const batch = db.batch();
-          let totalRemovido = 0;
-          docsParaApagar.forEach(d => {
-            totalRemovido += Number(d.data().valor || 0);
-            batch.delete(d.ref);
-          });
-          await batch.commit();
-
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `🗑️ *Último envio desfeito!*\nForam removidos *${docsParaApagar.length} lançamentos* vinculados (Total: R$ ${totalRemovido.toFixed(2)}).`
-          });
-          return;
-        }
-      }
-
-      await docRecente.ref.delete();
-      await enviarMensagemSegura(sock, remoteJid, {
-        text: `🗑️ *Lançamento removido com sucesso!*\n• ${dadosRecentes.descricao} [${dadosRecentes.categoria}] — R$ ${Number(dadosRecentes.valor || 0).toFixed(2)}`
-      });
+    // Consultas de Contas a Vencer
+    if (/proxima|proximas|5 dias/i.test(txtLimpo) && /conta|vencimento|vencer/i.test(txtLimpo)) {
+      const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
+      const hojeZero = new Date(hojeIso + 'T00:00:00');
+      const limite5 = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
+      const prox = snapAll.docs.map(d => d.data()).filter(t => t.pago === false && t.data_vencimento && new Date(t.data_vencimento + 'T00:00:00') <= limite5);
+      const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence: ${formatarDataBR(t.data_vencimento)})`).join('\n');
+      await enviarMensagemSegura(sock, remoteJid, { text: `⏳ *Contas Próximas (Até 5 dias)*\n\n${linhas || 'Nenhuma conta nos próximos 5 dias.'}` });
       return;
     }
 
-    // ------------------------------------------------------------------------
-    // MODO 0.5: CONTAS PRÓXIMAS DO VENCIMENTO (ATÉ 5 DIAS) E CONTAS A VENCER DO MÊS
-    // ------------------------------------------------------------------------
-    const isProximasVencimento = /proxima|proximo|proximos|vencendo|5 dias/i.test(txtLimpo) && /conta|vencimento|vencer/i.test(txtLimpo);
-    const isContasAVencerMes = /contas a vencer|contas em aberto|o que vence|contas pendentes|a pagar/i.test(txtLimpo);
-
-    if (isProximasVencimento || isContasAVencerMes) {
-      const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
-      const todasTrans = snapAll.docs.map(d => d.data());
-
-      if (isProximasVencimento) {
-        const hojeZero = new Date(hojeStr + 'T00:00:00');
-        const limite5Dias = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
-
-        const listaProximas = todasTrans.filter(t => {
-          if (t.pago !== false || !t.data_vencimento) return false;
-          const dtVenc = new Date(t.data_vencimento + 'T00:00:00');
-          return dtVenc <= limite5Dias;
-        }).sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
-
-        if (listaProximas.length === 0) {
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `⏳ *Contas Próximas do Vencimento (Até 5 dias)*\n\n🎉 Você não tem nenhuma conta em aberto vencendo nos próximos 5 dias!`
-          });
-          return;
-        }
-
-        const totalProx = listaProximas.reduce((acc, t) => acc + Number(t.valor || 0), 0);
-        const linhas = listaProximas.map(t => {
-          const dtVenc = new Date(t.data_vencimento + 'T00:00:00');
-          const diffDias = Math.round((dtVenc - hojeZero) / (1000 * 60 * 60 * 24));
-          const tagDia = diffDias < 0 ? `🚨 *Vencida há ${Math.abs(diffDias)} dia(s)*` : diffDias === 0 ? '⚠️ *Vence HOJE*' : `faltam ${diffDias} dia(s)`;
-          return `• *${t.descricao}* [${t.categoria}]\n   💰 R$ ${Number(t.valor).toFixed(2)} — Vence: *${formatarDataBR(t.data_vencimento)}* (${tagDia})`;
-        }).join('\n\n');
-
-        await enviarMensagemSegura(sock, remoteJid, {
-          text: `⏳ *Contas Próximas do Vencimento (Até 5 dias)*\n\n${linhas}\n\n📌 *Total:* R$ ${totalProx.toFixed(2)}`
-        });
-        return;
-      }
-
-      if (isContasAVencerMes) {
-        const abertasMes = todasTrans
-          .filter(t => t.anoMes === anoMesAtual && t.pago === false)
-          .sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
-
-        if (abertasMes.length === 0) {
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `📅 *Contas a Vencer (${anoMesAtual})*\n\n✅ Você não tem nenhuma conta em aberto neste mês!`
-          });
-          return;
-        }
-
-        const totalPagar = abertasMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
-        const totalReceber = abertasMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
-
-        const linhas = abertasMes.map(t => {
-          const icone = t.tipo === 'RECEITA' ? '🟢 [A Receber]' : '🔴 [A Pagar]';
-          return `${icone} *${t.descricao}* — R$ ${Number(t.valor).toFixed(2)}\n   📅 Vencimento: *${formatarDataBR(t.data_vencimento)}*`;
-        }).join('\n\n');
-
-        await enviarMensagemSegura(sock, remoteJid, {
-          text: `📅 *Contas em Aberto do Mês (${anoMesAtual})*\n\n${linhas}\n\n🔴 *Total a Pagar:* R$ ${totalPagar.toFixed(2)}\n🟢 *Total a Receber:* R$ ${totalReceber.toFixed(2)}`
-        });
-        return;
-      }
+    if (/contas a vencer|contas em aberto/i.test(txtLimpo)) {
+      const abertas = transacoesFiltradas.filter(t => t.anoMes === anoMesAtual && t.pago === false);
+      const linhas = abertas.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence: ${formatarDataBR(t.data_vencimento)})`).join('\n');
+      await enviarMensagemSegura(sock, remoteJid, { text: `📅 *Contas em Aberto*\n\n${linhas || 'Nenhuma conta em aberto.'}` });
+      return;
     }
 
-    // ------------------------------------------------------------------------
-    // MODO 1: CONSULTOR FINANCEIRO
-    // ------------------------------------------------------------------------
-    const isPergunta = /\?|quanto|qual|resumo|saldo|saldos|fatura|limite|disponivel|melhor dia|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLimpo);
-    
+    // Consultor Geral
+    const isPergunta = /\?|quanto|qual|resumo|saldo|saldos|fatura|limite/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLimpo);
     if (isPergunta) {
-      const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
-      const todasTrans = snapAll.docs.map(d => d.data());
-      const transMes = todasTrans.filter(t => t.anoMes === anoMesAtual);
-
-      const catPerguntada = categorias.find(cat => txtLimpo.includes(semAcento(cat)));
-      if (catPerguntada) {
-        const gastoCat = transMes
-          .filter(t => t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(catPerguntada) && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
-          .reduce((a, b) => a + Number(b.valor || 0), 0);
-
-        const limiteCat = Number(orcamentos[catPerguntada] || 0);
-
-        if (limiteCat > 0) {
-          const disponivel = limiteCat - gastoCat;
-          const pct = Math.round((gastoCat / limiteCat) * 100);
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `🎯 *Categoria: ${catPerguntada} (${anoMesAtual})*\n\n` +
-                  `• Limite definido: *R$ ${limiteCat.toFixed(2)}*\n` +
-                  `• Gasto até agora: *R$ ${gastoCat.toFixed(2)}* (${pct}%)\n` +
-                  `• ${disponivel >= 0 ? `Disponível para gastar: *R$ ${disponivel.toFixed(2)}* 🟢` : `Limite excedido em: *R$ ${Math.abs(disponivel).toFixed(2)}* 🔴`}`
-          });
-        } else {
-          await enviarMensagemSegura(sock, remoteJid, {
-            text: `📂 *Categoria: ${catPerguntada} (${anoMesAtual})*\n\n` +
-                  `• Gasto acumulado: *R$ ${gastoCat.toFixed(2)}*\n` +
-                  `• Limite mensal: *Sem limite definido no painel*`
-          });
-        }
-        return;
-      }
-
-      const cartaoPerguntado = cartoes.find(c => txtLimpo.includes(semAcento(c.nome)));
-      if (cartaoPerguntado) {
-        const faturaMes = transMes
-          .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoPerguntado.nome) && !t.fatura_paga)
-          .reduce((a, b) => a + Number(b.valor || 0), 0);
-
-        const comprometidoTotal = todasTrans
-          .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoPerguntado.nome) && !t.fatura_paga && t.anoMes >= anoMesAtual)
-          .reduce((a, b) => a + Number(b.valor || 0), 0);
-
-        const limiteCartao = Number(cartaoPerguntado.limite || 0);
-        const disponivelCartao = limiteCartao - comprometidoTotal;
-
-        await enviarMensagemSegura(sock, remoteJid, {
-          text: `💳 *Cartão ${cartaoPerguntado.nome}*\n\n` +
-                `• Fatura deste mês (${anoMesAtual}): *R$ ${faturaMes.toFixed(2)}*\n` +
-                `• Total comprometido (com parcelas): *R$ ${comprometidoTotal.toFixed(2)}*\n` +
-                `• Limite total: *R$ ${limiteCartao.toFixed(2)}*\n` +
-                `• Limite disponível: *R$ ${disponivelCartao.toFixed(2)}*\n` +
-                `📅 Fechamento (Melhor dia): *Dia ${cartaoPerguntado.diaFechamento || 5}* | Vencimento: *Dia ${cartaoPerguntado.diaVencimento || 12}*`
-        });
-        return;
-      }
-
-      if (/cartao|cartoes|fatura|melhor dia/i.test(txtLimpo)) {
-        let msgCartoes = `💳 *Resumo dos seus Cartões*\n\n`;
-        for (const c of cartoes) {
-          const faturaC = transMes
-            .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(c.nome) && !t.fatura_paga)
-            .reduce((a, b) => a + Number(b.valor || 0), 0);
-          const compC = todasTrans
-            .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(c.nome) && !t.fatura_paga && t.anoMes >= anoMesAtual)
-            .reduce((a, b) => a + Number(b.valor || 0), 0);
-          const dispC = Number(c.limite || 0) - compC;
-          msgCartoes += `🔹 *${c.nome}*\n   Fatura Mês: R$ ${faturaC.toFixed(2)} | Disponível: R$ ${dispC.toFixed(2)}\n   Melhor dia compra: Dia ${c.diaFechamento || 5} (Vence dia ${c.diaVencimento || 12})\n\n`;
-        }
-        await enviarMensagemSegura(sock, remoteJid, { text: msgCartoes.trim() });
-        return;
-      }
-
-      const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false && t.metodo !== 'TRANSFERENCIA').reduce((a, b) => a + Number(b.valor || 0), 0);
-      const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA').reduce((a, b) => a + Number(b.valor || 0), 0);
-
-      let linhasBancos = '';
-      let somaBancos = 0;
-      bancos.forEach((b, idx) => {
-        const entB = todasTrans
-          .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (semAcento(t.banco_nome) === semAcento(b.nome) || (!t.banco_nome && idx === 0)))
-          .reduce((a, x) => a + Number(x.valor || 0), 0);
-        const saiB = todasTrans
-          .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO' && (semAcento(t.banco_nome) === semAcento(b.nome) || (!t.banco_nome && idx === 0)))
-          .reduce((a, x) => a + Number(x.valor || 0), 0);
-        const sldB = Number(b.saldoInicial || 0) + entB - saiB;
-        somaBancos += sldB;
-        linhasBancos += `• *${b.nome}:* R$ ${sldB.toFixed(2)} ${sldB < 0 ? '🚨 *(Cheque Especial)*' : ''}\n`;
-      });
-
-      await enviarMensagemSegura(sock, remoteJid, {
-        text: `📊 *Resumo FinZap (${anoMesAtual})*\n\n` +
-              `🟢 Receitas do Mês: R$ ${rec.toFixed(2)}\n` +
-              `🔴 Despesas do Mês: R$ ${desp.toFixed(2)}\n` +
-              `📈 Resultado: *R$ ${(rec - desp).toFixed(2)}*\n\n` +
-              `🏦 *Saldos por Conta:*\n${linhasBancos}\n` +
-              `💰 *Saldo Geral Disponível: R$ ${somaBancos.toFixed(2)}*`
-      });
+      const transMes = transacoesFiltradas;
+      const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false).reduce((a, b) => a + Number(b.valor || 0), 0);
+      const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA').reduce((a, b) => a + Number(b.valor || 0), 0);
+      await enviarMensagemSegura(sock, remoteJid, { text: `📊 *Resumo FinZap (${anoMesAtual})*\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Resultado: R$ ${(rec - desp).toFixed(2)}*` });
       return;
     }
 
-    // ------------------------------------------------------------------------
-    // MODO 2: LANÇAMENTOS (Com Regex Corrigida e Subcategorias)
-    // ------------------------------------------------------------------------
+    // Lançamentos normais com aprendizado
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
-    
     let itensExtraidos = [];
 
     for (const parte of partes) {
       const pLimpo = semAcento(parte);
-
-      const infoVencimento = extrairDataVencimento(parte);
-      const isAgendado = Boolean(infoVencimento) || /\b(vence|vencimento|a pagar|a receber|boleto para)\b/i.test(pLimpo);
-
-      const parteSemData = infoVencimento ? parte.replace(infoVencimento.trechoRemovido, ' ') : parte;
-      const pLimpoSemData = semAcento(parteSemData);
-
-      const matchParcelas = pLimpoSemData.match(/\b(\d+)\s*(?:x|vezes|parcelas)\b/i);
-      const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
-
-      const textoSemParcela = matchParcelas ? parteSemData.replace(new RegExp(matchParcelas[0], 'i'), '') : parteSemData;
-      const matchValor = textoSemParcela.match(/(\d+\.\d{2}|\d+)/);
+      const infoVenc = extrairDataVencimento(parte);
+      const isAgendado = Boolean(infoVenc) || /\b(vence|vencimento|a pagar|a receber)\b/i.test(pLimpo);
+      const parteSemData = infoVenc ? parte.replace(infoVenc.trechoRemovido, ' ') : parte;
+      const matchValor = parteSemData.match(/(\d+\.\d{2}|\d+)/);
       if (!matchValor) continue;
 
       const valorTotal = parseFloat(matchValor[0]);
       if (isNaN(valorTotal) || valorTotal <= 0) continue;
 
-      const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
-      const isReceita = /\b(recebi|ganhei|salario|venda|a receber|receber)\b/i.test(pLimpo);
-      const tipo = isReceita ? 'RECEITA' : 'DESPESA';
-
+      const isReceita = /\b(recebi|ganhei|salario|venda|a receber)\b/i.test(pLimpo);
       let metodo = null;
       let cartaoNome = null;
       let bancoNome = null;
 
-      for (const c of cartoes) {
-        if (pLimpo.includes(semAcento(c.nome))) {
-          metodo = 'CREDITO';
-          cartaoNome = c.nome;
-          break;
-        }
-      }
+      for (const c of cartoes) { if (pLimpo.includes(semAcento(c.nome))) { metodo = 'CREDITO'; cartaoNome = c.nome; break; } }
+      for (const b of bancos) { if (pLimpo.includes(semAcento(b.nome))) { bancoNome = b.nome; if (!metodo) metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX'; break; } }
 
-      for (const b of bancos) {
-        if (pLimpo.includes(semAcento(b.nome))) {
-          bancoNome = b.nome;
-          if (!metodo) {
-            metodo = /\bdebito\b/i.test(pLimpo) ? 'DEBITO' : 'PIX';
-          }
-          break;
-        }
-      }
-
-      if (!metodo) {
-        if (/\b(credito|cartao)\b/i.test(pLimpo) || parcelasTotal > 1) {
-          metodo = 'CREDITO';
-          cartaoNome = cartoes[0]?.nome || 'CREDITO';
-        } else if (/\bdebito\b/i.test(pLimpo)) {
-          metodo = 'DEBITO';
-        } else if (/\bpix\b/i.test(pLimpo)) {
-          metodo = 'PIX';
-        } else if (/\b(dinheiro|especie)\b/i.test(pLimpo)) {
-          metodo = 'DINHEIRO';
-        } else if (isAgendado) {
-          metodo = 'BOLETO / AGENDADO';
-        } else if (isReceita) {
-          metodo = 'PIX';
-        }
-      }
-
-      const classif = classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategorias);
-
-      let descricao = textoSemParcela
-        .replace(/\b(fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|a pagar|a receber|dia|no cartao de credito|cartao de credito|no cartao|cartão|cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|dinheiro|reais|um|uma|uns|umas|de|do|da|no|na|em)\b/gi, ' ')
-        .replace(/r\$/gi, ' ')
-        .replace(matchValor[0], '')
-        .replace(cartaoNome ? new RegExp(`\\b${cartaoNome}\\b`, 'gi') : '', '')
-        .replace(bancoNome ? new RegExp(`\\b${bancoNome}\\b`, 'gi') : '', '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (!descricao || descricao.length < 2) descricao = classif.subcategoria || classif.categoria || 'Lançamento';
+      let descricao = parteSemData.replace(/\b(comprei|gastei|paguei|no pix|no debito|pix|debito|reais|r\$|de|do|da|no|na|em)\b/gi, ' ').replace(matchValor[0], '').trim();
       descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
+
+      // Consulta a memória de aprendizado adaptativa
+      const regraSalva = await consultarRegraAprendida(userId, descricao);
+      let cat = regraSalva ? regraSalva.categoria : null;
+      let sub = regraSalva ? regraSalva.subcategoria : null;
+
+      if (!cat) {
+        const classif = classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcategorias);
+        cat = classif.categoria;
+        sub = classif.subcategoria;
+      }
 
       itensExtraidos.push({
         descricao,
         valorTotal,
-        valorParcela,
-        parcelasTotal,
-        tipo,
+        valorParcela: valorTotal,
+        parcelasTotal: 1,
+        tipo: isReceita ? 'RECEITA' : 'DESPESA',
         metodo,
         cartao_nome: cartaoNome,
         banco_nome: bancoNome,
-        categoria: classif.categoria,
-        subcategoria: classif.subcategoria,
-        precisaPerguntarCategoria: !classif.reconhecida,
+        categoria: cat,
+        subcategoria: sub,
+        precisaPerguntarCategoria: !cat,
         pago: !isAgendado,
-        data_vencimento: infoVencimento ? infoVencimento.dataVencimento : hojeStr,
-        anoMes: infoVencimento ? infoVencimento.anoMes : anoMesAtual
+        data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeStr,
+        anoMes: infoVenc ? infoVenc.anoMes : anoMesAtual
       });
     }
 
@@ -1483,26 +1100,14 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
   }
 }
 
-// ============================================================================
-// 9. AUTO-RECONEXÃO QUANDO O SERVIDOR REINICIA
-// ============================================================================
 async function restaurarSessoesAtivas() {
   try {
-    const usersSnap = await db.collection('users')
-      .where('whatsapp_status', '==', 'CONNECTED')
-      .get();
-
-    usersSnap.forEach(doc => {
-      console.log(`🔄 A restaurar sessão automática para o utilizador: ${doc.id}`);
-      startWhatsAppForUser(doc.id);
-    });
-  } catch (err) {
-    console.error('Erro ao restaurar sessões:', err);
-  }
+    const usersSnap = await db.collection('users').where('whatsapp_status', '==', 'CONNECTED').get();
+    usersSnap.forEach(doc => startWhatsAppForUser(doc.id));
+  } catch (err) {}
 }
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 FinZap WhatsApp Server a rodar na porta ${PORT}`);
   restaurarSessoesAtivas();
 });
