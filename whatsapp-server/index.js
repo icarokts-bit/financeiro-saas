@@ -5,6 +5,7 @@ import QRCode from 'qrcode';
 import pino from 'pino';
 import admin from 'firebase-admin';
 
+// 1. Inicialização do Firebase Admin
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
   console.error('❌ ERRO: Variável FIREBASE_SERVICE_ACCOUNT não configurada!');
 } else {
@@ -23,24 +24,31 @@ app.use(express.json());
 
 const sessions = new Map();
 
+// Função auxiliar para remover acentos nas comparações ("alimentação" -> "alimentacao")
+const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
+
+// Rota principal (usada pelo cron-job.org para manter o servidor acordado 24h)
 app.get('/', (req, res) => {
-  res.json({ status: 'online', service: 'FinZap WhatsApp Worker (Firestore Auth)', activeSessions: sessions.size });
+  res.json({ 
+    status: 'online', 
+    service: 'FinZap WhatsApp Worker (Firestore Auth + IA)', 
+    activeSessions: sessions.size 
+  });
 });
 
-// Quando clica no botão "Gerar QR Code" no painel, limpa sessão travada e gera um novo QR Code
+// Rota para gerar novo QR Code
 app.post('/conectar', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
 
   try {
-    // Se já houver um socket antigo travado, encerra antes de gerar novo QR
     const sockAntigo = sessions.get(userId);
     if (sockAntigo) {
       try { sockAntigo.end(); } catch (e) {}
       sessions.delete(userId);
     }
 
-    // Limpa credenciais antigas corrompidas para forçar a criação de um QR Code novo
+    // Limpa sessão antiga travada para forçar um QR Code novo
     const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
     const docs = await sessionRef.get();
     if (!docs.empty) {
@@ -57,6 +65,7 @@ app.post('/conectar', async (req, res) => {
   }
 });
 
+// Rota para desconectar aparelho
 app.post('/desconectar', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
@@ -83,11 +92,11 @@ app.post('/desconectar', async (req, res) => {
   res.json({ ok: true });
 });
 
-// ADAPTADOR CORRIGIDO (ASYNC) DO BAILEYS PARA O FIRESTORE
+// ============================================================================
+// 2. ADAPTADOR DE AUTENTICAÇÃO DO BAILEYS NO FIREBASE FIRESTORE
+// ============================================================================
 async function useFirestoreAuthState(userId) {
   const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
-
-  // O Firestore não aceita caracteres '/' no ID do documento
   const fixId = (id) => id.replace(/\//g, '__').replace(/\./g, '_');
 
   const writeData = async (data, id) => {
@@ -117,7 +126,6 @@ async function useFirestoreAuthState(userId) {
     } catch (error) {}
   };
 
-  // IMPORTANTE: creds precisa ser um objeto resolvido com await!
   const creds = (await readData('creds')) || initAuthCreds();
 
   return {
@@ -151,6 +159,9 @@ async function useFirestoreAuthState(userId) {
   };
 }
 
+// ============================================================================
+// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP
+// ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
     console.log(`⚡ Iniciando instância WhatsApp para userId: ${userId}`);
@@ -213,7 +224,16 @@ async function startWhatsAppForUser(userId) {
       const texto = msg.message.conversation || msg.message.extendedTextMessage?.text;
       if (!texto) return;
 
-      if (texto.startsWith('✅') || texto.startsWith('📊') || texto.startsWith('💳') || texto.startsWith('🤖') || texto.startsWith('📂')) return;
+      // Ignora mensagens enviadas pelo próprio robô para não dar loop infinito
+      if (
+        texto.startsWith('✅') || 
+        texto.startsWith('📊') || 
+        texto.startsWith('💳') || 
+        texto.startsWith('🤖') || 
+        texto.startsWith('📂') || 
+        texto.startsWith('🎯') ||
+        texto.startsWith('⚠️')
+      ) return;
 
       await processarMensagemInteligente(userId, texto, sock, msg.key.remoteJid);
     });
@@ -223,22 +243,91 @@ async function startWhatsAppForUser(userId) {
   }
 }
 
+// ============================================================================
+// 4. MOTOR DE INTELIGÊNCIA FINANCEIRA (CONSULTAS E LANÇAMENTOS)
+// ============================================================================
 async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
   try {
     const userDoc = await db.collection('users').doc(userId).get();
     const userData = userDoc.data() || {};
     const cartoes = userData.cartoes || [{ nome: 'VISA', limite: 5000 }, { nome: 'NUBANK', limite: 3500 }];
     const categorias = userData.categorias || ['Mercado', 'Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros'];
+    const orcamentos = userData.orcamentos || {};
 
-    const txtLower = textoUsuario.toLowerCase();
+    const txtLimpo = semAcento(textoUsuario);
     const hoje = new Date();
     const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
 
-    // 1. Consultas Rápidas
-    const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite/i.test(txtLower) && !/gastei|comprei|paguei|recebi/i.test(txtLower);
+    // ------------------------------------------------------------------------
+    // MODO 1: CONSULTOR FINANCEIRO (Responde perguntas sobre Limites, Cartões e Saldo)
+    // ------------------------------------------------------------------------
+    const isPergunta = /\?|quanto|qual|resumo|saldo|fatura|limite|disponivel|posso gastar/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi/i.test(txtLimpo);
+    
     if (isPergunta) {
       const snap = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
       const transMes = snap.docs.map(d => d.data());
+
+      // A) Perguntou sobre uma CATEGORIA específica (ex: "Qual o limite de alimentação?")
+      const catPerguntada = categorias.find(cat => txtLimpo.includes(semAcento(cat)));
+      if (catPerguntada) {
+        const gastoCat = transMes
+          .filter(t => t.tipo === 'DESPESA' && semAcento(t.categoria) === semAcento(catPerguntada))
+          .reduce((a, b) => a + Number(b.valor || 0), 0);
+
+        const limiteCat = Number(orcamentos[catPerguntada] || 0);
+
+        if (limiteCat > 0) {
+          const disponivel = limiteCat - gastoCat;
+          const pct = Math.round((gastoCat / limiteCat) * 100);
+          await sock.sendMessage(remoteJid, {
+            text: `🎯 *Categoria: ${catPerguntada} (${anoMesAtual})*\n\n` +
+                  `• Limite definido: *R$ ${limiteCat.toFixed(2)}*\n` +
+                  `• Gasto até agora: *R$ ${gastoCat.toFixed(2)}* (${pct}%)\n` +
+                  `• ${disponivel >= 0 ? `Disponível para gastar: *R$ ${disponivel.toFixed(2)}* 🟢` : `Limite excedido em: *R$ ${Math.abs(disponivel).toFixed(2)}* 🔴`}`
+          });
+        } else {
+          await sock.sendMessage(remoteJid, {
+            text: `📂 *Categoria: ${catPerguntada} (${anoMesAtual})*\n\n` +
+                  `• Gasto acumulado: *R$ ${gastoCat.toFixed(2)}*\n` +
+                  `• Limite mensal: *Sem limite definido no painel*`
+          });
+        }
+        return;
+      }
+
+      // B) Perguntou sobre um CARTÃO específico (ex: "Qual a fatura do VISA?")
+      const cartaoPerguntado = cartoes.find(c => txtLimpo.includes(semAcento(c.nome)));
+      if (cartaoPerguntado) {
+        const gastoCartao = transMes
+          .filter(t => semAcento(t.cartao_nome) === semAcento(cartaoPerguntado.nome))
+          .reduce((a, b) => a + Number(b.valor || 0), 0);
+        const limiteCartao = Number(cartaoPerguntado.limite || 0);
+        const disponivelCartao = limiteCartao - gastoCartao;
+
+        await sock.sendMessage(remoteJid, {
+          text: `💳 *Cartão ${cartaoPerguntado.nome} (${anoMesAtual})*\n\n` +
+                `• Fatura atual: *R$ ${gastoCartao.toFixed(2)}*\n` +
+                `• Limite total: *R$ ${limiteCartao.toFixed(2)}*\n` +
+                `• Limite disponível: *R$ ${disponivelCartao.toFixed(2)}*`
+        });
+        return;
+      }
+
+      // C) Perguntou sobre "cartão" em geral sem dizer qual
+      if (/cartao|cartoes|fatura/i.test(txtLimpo)) {
+        let msgCartoes = `💳 *Resumo dos seus Cartões (${anoMesAtual})*\n\n`;
+        for (const c of cartoes) {
+          const gastoC = transMes
+            .filter(t => semAcento(t.cartao_nome) === semAcento(c.nome))
+            .reduce((a, b) => a + Number(b.valor || 0), 0);
+          const dispC = Number(c.limite || 0) - gastoC;
+          msgCartoes += `🔹 *${c.nome}*\n   Fatura: R$ ${gastoC.toFixed(2)} | Disponível: R$ ${dispC.toFixed(2)}\n\n`;
+        }
+        await sock.sendMessage(remoteJid, { text: msgCartoes.trim() });
+        return;
+      }
+
+      // D) Resumo Geral do Mês
       const rec = transMes.filter(t => t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0);
       const desp = transMes.filter(t => t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0);
 
@@ -248,55 +337,65 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       return;
     }
 
-    // 2. Normalização de decimais (50,00 -> 50.00) para não fatiar na vírgula
+    // ------------------------------------------------------------------------
+    // MODO 2: LANÇAMENTOS (Simples, Múltiplos ou Parcelados)
+    // ------------------------------------------------------------------------
+    // Converte decimais com vírgula (50,00 -> 50.00) antes de separar a frase por vírgula
     let textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
     const partes = textoNormalizado.split(/(?:,|\s+e\s+)/gi).map(p => p.trim()).filter(Boolean);
     let respostas = [];
 
     for (const parte of partes) {
-      const pLow = parte.toLowerCase();
-      const matchValor = parte.match(/(\d+\.\d{2}|\d+)/);
+      const pLimpo = semAcento(parte);
+
+      // Identifica se tem parcelamento (ex: "3x", "3 vezes")
+      const matchParcelas = pLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+      const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
+
+      const textoSemParcela = matchParcelas ? parte.replace(new RegExp(matchParcelas[0], 'i'), '') : parte;
+      const matchValor = textoSemParcela.match(/(\d+\.\d{2}|\d+)/);
       if (!matchValor) continue;
 
-      const valor = parseFloat(matchValor[0]);
-      if (isNaN(valor) || valor <= 0) continue;
+      const valorTotal = parseFloat(matchValor[0]);
+      if (isNaN(valorTotal) || valorTotal <= 0) continue;
 
-      const isReceita = /recebi|ganhei|salário|salario|venda/i.test(pLow);
+      const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
+      const isReceita = /recebi|ganhei|salario|venda/i.test(pLimpo);
       const tipo = isReceita ? 'RECEITA' : 'DESPESA';
 
       let metodo = 'PIX/DINHEIRO';
       let cartaoNome = null;
-      if (/crédito|credito|cartão|cartao/i.test(pLow)) {
+      if (/credito|cartao/i.test(pLimpo) || parcelasTotal > 1) {
         metodo = 'CREDITO';
         for (const c of cartoes) {
-          if (pLow.includes(c.nome.toLowerCase())) {
+          if (pLimpo.includes(semAcento(c.nome))) {
             cartaoNome = c.nome;
             break;
           }
         }
         if (!cartaoNome && cartoes.length > 0) cartaoNome = cartoes[0].nome;
-      } else if (/débito|debito/i.test(pLow)) {
+      } else if (/debito/i.test(pLimpo)) {
         metodo = 'DEBITO';
-      } else if (/pix/i.test(pLow)) {
+      } else if (/pix/i.test(pLimpo)) {
         metodo = 'PIX';
       }
 
       let categoria = isReceita ? 'Receita' : 'Outros';
-      if (/mercado|supermercado|compras|cebola/i.test(pLow)) categoria = 'Mercado';
-      else if (/lanche|restaurante|ifood|padaria|almoço|jantar|burger|pizza/i.test(pLow)) categoria = 'Alimentação';
-      else if (/uber|gasolina|combustível|posto|estacionamento|pedágio/i.test(pLow)) categoria = 'Transporte';
-      else if (/cinema|passeio|bar|viagem|lazer|shopping/i.test(pLow)) categoria = 'Lazer';
-      else if (/luz|água|internet|energia|boleto|aluguel/i.test(pLow)) categoria = 'Contas';
+      if (/mercado|supermercado|compras|cebola|atacadao|acougue|hortifruti/i.test(pLimpo)) categoria = 'Mercado';
+      else if (/lanche|restaurante|ifood|padaria|almoco|jantar|burger|pizza|cafe/i.test(pLimpo)) categoria = 'Alimentação';
+      else if (/uber|gasolina|combustivel|posto|estacionamento|pedagio/i.test(pLimpo)) categoria = 'Transporte';
+      else if (/cinema|passeio|bar|viagem|lazer|shopping|netflix|streaming/i.test(pLimpo)) categoria = 'Lazer';
+      else if (/luz|agua|internet|energia|boleto|aluguel|condominio/i.test(pLimpo)) categoria = 'Contas';
 
       for (const cat of categorias) {
-        if (pLow.includes(cat.toLowerCase())) {
+        if (pLimpo.includes(semAcento(cat))) {
           categoria = cat;
           break;
         }
       }
 
-      let descricao = parte
-        .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|no pix|no credito|no débito|credito|debito|pix|reais|r\$|de |do |da |no |na /gi, ' ')
+      let descricao = textoSemParcela
+        .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|no cartao de credito|no cartao|no pix|no credito|no debito|no débito|credito|crédito|debito|débito|pix|reais|r\$|de |do |da |no |na |em /gi, ' ')
         .replace(matchValor[0], '')
         .replace(cartaoNome ? new RegExp(cartaoNome, 'gi') : '', '')
         .replace(/\s+/g, ' ')
@@ -305,19 +404,29 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       if (!descricao || descricao.length < 2) descricao = categoria;
       descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
 
-      await db.collection('users').doc(userId).collection('transacoes').add({
-        descricao,
-        valor,
-        tipo,
-        metodo,
-        cartao_nome: cartaoNome,
-        categoria,
-        anoMes: anoMesAtual,
-        origem: 'WHATSAPP_IA',
-        criadoEm: admin.firestore.FieldValue.serverTimestamp()
-      });
+      for (let i = 0; i < parcelasTotal; i++) {
+        const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
+        const anoM = dataParcela.getFullYear();
+        const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
 
-      respostas.push(`✅ *${descricao}* [${categoria}]\n💰 R$ ${valor.toFixed(2)} • ${cartaoNome || metodo}`);
+        await db.collection('users').doc(userId).collection('transacoes').add({
+          descricao: parcelasTotal > 1 ? `${descricao} (${i + 1}/${parcelasTotal})` : descricao,
+          valor: valorParcela,
+          tipo,
+          metodo,
+          cartao_nome: cartaoNome,
+          categoria,
+          anoMes: `${anoM}-${mesM}`,
+          origem: 'WHATSAPP_IA',
+          mensagem_original: textoUsuario,
+          criadoEm: admin.firestore.FieldValue.serverTimestamp()
+        });
+      }
+
+      respostas.push(
+        `✅ *${descricao}* [${categoria}]\n` +
+        `💰 R$ ${valorParcela.toFixed(2)} ${parcelasTotal > 1 ? `(${parcelasTotal}x)` : ''} • ${cartaoNome || metodo}`
+      );
     }
 
     if (respostas.length > 0) {
@@ -325,11 +434,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     }
 
   } catch (e) {
-    console.error('Erro:', e);
+    console.error('Erro no processamento da mensagem:', e);
   }
 }
 
-// Reconecta automaticamente todas as sessões ativas no Firestore quando o servidor reinicia
+// ============================================================================
+// 5. AUTO-RECONEXÃO QUANDO O SERVIDOR REINICIA
+// ============================================================================
 async function restaurarSessoesAtivas() {
   try {
     const usersSnap = await db.collection('users')
