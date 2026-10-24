@@ -23,7 +23,7 @@ import {
   PieChart, Pie, Cell 
 } from 'recharts';
 
-const RENDER_API_URL = 'financeiro-saas-production-66cc.up.railway.app';
+const RENDER_API_URL = 'https://financeiro-saas-production-66cc.up.railway.app';
 
 const formatarDataBR = (isoDate) => {
   if (!isoDate || !isoDate.includes('-')) return isoDate || '-';
