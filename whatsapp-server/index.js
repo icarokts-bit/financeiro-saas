@@ -46,7 +46,6 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   return msgEnviada;
 }
 
-// Rota principal leve para o cron-job.org nunca dar "output too large"[cite: 7, 8, 9]
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
   res.status(200).send('OK');
@@ -201,7 +200,7 @@ async function useFirestoreAuthState(userId) {
 }
 
 // ============================================================================
-// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM GETMESSAGE ANTI-FALHA DE CIFRA)
+// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP
 // ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
@@ -270,7 +269,7 @@ async function startWhatsAppForUser(userId) {
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       const msg = messages[0];
-      if (!msg.message || !msg.key.fromMe) return;
+      if (!msg.message) return;
 
       const remoteJid = msg.key.remoteJid || '';
 
@@ -448,7 +447,6 @@ function extrairDataVencimento(texto) {
   return null;
 }
 
-// Consulta a memória de aprendizado adaptativa no Firestore
 async function consultarRegraAprendida(userId, descricaoItem) {
   try {
     const descLimpa = semAcento(descricaoItem).trim();
@@ -485,17 +483,14 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Receita', subcategoria: 'Vendas / Extras', reconhecida: true };
   }
 
-  // Alimentação > Mercado
   if (/mercado|supermercado|atacadao|assai|tenda|compras|feira|acougue|hortifruti|laranja|maca|banana|uva|morango|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|peixe|ovo|leite|pao|queijo|presunto|manteiga|oleo|azeite|acucar|sal|sabao|detergente|papel higienico/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
 
-  // Alimentação > Lazer
   if (/lanche|hamburguer|burger|pizza|pizzaria|restaurante|ifood|padaria|almoco|jantar|cafe|sorvete|acai|pastel|salgado|churrasco|barzinho|bebida|cerveja|refrigerante|suco|doceria|bolo|chocolate/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
   }
 
-  // Transporte
   if (/uber|99|taxi|onibus|metro|passagem|estacionamento|pedagio/i.test(pLimpo)) {
     return { categoria: 'Transporte', subcategoria: 'Apps / Pedágio', reconhecida: true };
   }
@@ -506,7 +501,6 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Transporte', subcategoria: 'Manutenção / Veículo', reconhecida: true };
   }
 
-  // Lazer
   if (/cinema|passeio|parque|show|ingresso|viagem|hotel|pousada|shopping|jogo|game|brinquedo/i.test(pLimpo)) {
     return { categoria: 'Lazer', subcategoria: 'Passeios', reconhecida: true };
   }
@@ -514,7 +508,6 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Lazer', subcategoria: 'Streaming', reconhecida: true };
   }
 
-  // Contas
   if (/luz|energia|agua|sabesp|gas|internet|wifi|telefone|celular|vivo|claro|tim|aluguel|condominio|iptu|boleto|imposto|mei|das|contador|escola|faculdade|curso|farmacia|remedio|medico|consulta|exame|dentista/i.test(pLimpo)) {
     if (/luz|energia|agua|gas|internet|telefone|celular|aluguel|condominio|iptu/i.test(pLimpo)) {
       return { categoria: 'Contas', subcategoria: 'Casa / Fixas', reconhecida: true };
@@ -558,7 +551,6 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
     const catFinal = item.categoria || 'Outros';
     const subFinal = item.subcategoria || 'Geral';
 
-    // Grava a regra aprendida no Firestore
     await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
 
     for (let i = 0; i < parcelasTotal; i++) {
@@ -660,7 +652,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 
     respostas.push(
       `🧠 *[Aprendido]* ✅ *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
-      `💰 R$ ${valorParcela.toFixed(2)} • ${origemPagamento}${alertasExtras}`
+      `💰 R$ ${valorParcela.toFixed(2)} - ${origemPagamento}${alertasExtras}`
     );
   }
 
@@ -771,7 +763,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
     if (/^(teste|ping|status)$/i.test(txtLimpo)) {
       await enviarMensagemSegura(sock, remoteJid, {
-        text: `🟢 *FinZap 100% Online com Aprendizado Adaptativo!*\n• Competência: ${anoMesAtual}`
+        text: `🟢 *FinZap 100% Online com Aprendizado Adaptativo!*\nCompetência: ${anoMesAtual}`
       });
       return;
     }
@@ -1007,10 +999,14 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
     }
 
+    // Injeção da variável transacoesFiltradas
+    const snapMesGeral = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
+    const transacoesFiltradas = snapMesGeral.docs.map(d => d.data());
+
     // Consultas de Contas a Vencer
     if (/proxima|proximas|5 dias/i.test(txtLimpo) && /conta|vencimento|vencer/i.test(txtLimpo)) {
       const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
-      const hojeZero = new Date(hojeIso + 'T00:00:00');
+      const hojeZero = new Date(hojeStr + 'T00:00:00');
       const limite5 = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
       const prox = snapAll.docs.map(d => d.data()).filter(t => t.pago === false && t.data_vencimento && new Date(t.data_vencimento + 'T00:00:00') <= limite5);
       const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence: ${formatarDataBR(t.data_vencimento)})`).join('\n');
@@ -1062,7 +1058,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       let descricao = parteSemData.replace(/\b(comprei|gastei|paguei|no pix|no debito|pix|debito|reais|r\$|de|do|da|no|na|em)\b/gi, ' ').replace(matchValor[0], '').trim();
       descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
 
-      // Consulta a memória de aprendizado adaptativa
       const regraSalva = await consultarRegraAprendida(userId, descricao);
       let cat = regraSalva ? regraSalva.categoria : null;
       let sub = regraSalva ? regraSalva.subcategoria : null;
