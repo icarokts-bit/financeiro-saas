@@ -550,6 +550,8 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
     const isAgendado = item.pago === false;
     const catFinal = item.categoria || 'Outros';
     const subFinal = item.subcategoria || 'Geral';
+    // Gera o ID único para vincular todas as parcelas desta compra
+    const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
 
@@ -576,6 +578,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         subcategoria: subFinal,
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
+        grupo_id: parcelasTotal > 1 ? grupoId : null, // Adiciona o vínculo no banco
         fatura_paga: false,
         pago: item.pago !== undefined ? item.pago : true,
         data_vencimento: dataVencItem,
