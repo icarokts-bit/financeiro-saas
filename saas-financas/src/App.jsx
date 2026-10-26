@@ -10,7 +10,8 @@ import {
 import { db, auth } from './firebaseConfig';
 import { 
   collection, addDoc, onSnapshot, deleteDoc, updateDoc, doc, 
-  query, orderBy, serverTimestamp, setDoc, getDoc 
+  query, orderBy, serverTimestamp, setDoc, getDoc,
+  writeBatch, where, getDocs 
 } from 'firebase/firestore';
 import { 
   signInWithEmailAndPassword, 
@@ -93,7 +94,7 @@ export default function App() {
     { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
   ]);
   
-  // Categorias e Subcategorias (Melhoria 9)
+  // Categorias e Subcategorias
   const [categorias, setCategorias] = useState(['Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
   const [subcategorias, setSubcategorias] = useState({
     'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Padaria'],
@@ -133,7 +134,7 @@ export default function App() {
   const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
 
-  // Estado de Transferência entre Contas (Melhoria 1)
+  // Estado de Transferência entre Contas
   const [formTransferencia, setFormTransferencia] = useState({
     bancoOrigem: 'Itaú',
     bancoDestino: 'Nubank Conta',
@@ -157,14 +158,13 @@ export default function App() {
   const [filtroVencStatus, setFiltroVencStatus] = useState('ABERTO');
   const [filtroVencData, setFiltroVencData] = useState('TODOS');
 
-  // Modal para perguntar de qual conta debitar ao dar baixa em conta agendada
   const [modalBaixaConta, setModalBaixaConta] = useState(null);
 
   // Estados da Aba "Movimentação (Extrato)"
   const [pesquisaExtrato, setPesquisaExtrato] = useState('');
   const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
 
-  // Estados da Aba Cartão de Crédito & Modal de Pagamento Total/Parcial (Melhoria 4, 7 e 10)
+  // Estados da Aba Cartão de Crédito & Modais
   const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
   const [novaCompraCartao, setNovaCompraCartao] = useState({
     descricao: '',
@@ -174,8 +174,13 @@ export default function App() {
     categoria: 'Alimentação',
     subcategoria: 'Lazer'
   });
+  
   const [modalPagarFatura, setModalPagarFatura] = useState(null);
   const [transacaoEditando, setTransacaoEditando] = useState(null);
+  const [aplicarFuturasEdicao, setAplicarFuturasEdicao] = useState(false);
+  
+  const [transacaoExcluindo, setTransacaoExcluindo] = useState(null);
+  const [aplicarFuturasExclusao, setAplicarFuturasExclusao] = useState(false);
 
   // Estados do Simulador de WhatsApp
   const [msgWhats, setMsgWhats] = useState('');
@@ -190,7 +195,6 @@ export default function App() {
 
   const CORES_GRAFICO = ['#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa', '#2dd4bf', '#fb7185', '#60a5fa'];
 
-  // Função para navegar entre os meses facilmente (Melhoria 5)
   const alterarMesCompetencia = (delta) => {
     const [ano, mes] = filtroMesAno.split('-').map(Number);
     const novaData = new Date(ano, (mes - 1) + delta, 15);
@@ -304,7 +308,6 @@ export default function App() {
 
   const handleLogout = async () => await signOut(auth);
 
-  // Conexão com Servidor WhatsApp na Render
   const solicitarConexaoWhatsApp = async () => {
     if (!user) return;
     setCarregandoQr(true);
@@ -315,7 +318,7 @@ export default function App() {
         body: JSON.stringify({ userId: user.uid })
       });
     } catch (e) {
-      alert('O servidor na Render pode estar acordando. Aguarde 15 segundos e tente novamente.');
+      alert('O servidor pode estar acordando. Aguarde 15 segundos e tente novamente.');
     } finally {
       setCarregandoQr(false);
     }
@@ -339,15 +342,12 @@ export default function App() {
   const dispararTesteAlertaWhatsApp = async () => {
     try {
       await fetch(`${RENDER_API_URL}/verificar-alertas`);
-      alert('🔔 O comando de verificação de alertas de vencimento foi enviado para o seu WhatsApp!');
+      alert('🔔 O comando de verificação de alertas foi acionado!');
     } catch (e) {
       alert('Erro ao acionar verificação no servidor.');
     }
   };
 
-  // ==========================================================================
-  // MELHORIA 1: TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS
-  // ==========================================================================
   const realizarTransferenciaEntreContas = async (e) => {
     e.preventDefault();
     if (!user || !formTransferencia.valor) return;
@@ -361,7 +361,6 @@ export default function App() {
     const dataTransf = formTransferencia.data || hojeIso;
     const anoMesTransf = dataTransf.slice(0, 7);
 
-    // Saída do Banco de Origem
     await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
       descricao: `Transferência enviada para ${formTransferencia.bancoDestino}`,
       valor: valorNum,
@@ -377,7 +376,6 @@ export default function App() {
       criadoEm: serverTimestamp()
     });
 
-    // Entrada no Banco de Destino
     await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
       descricao: `Transferência recebida de ${formTransferencia.bancoOrigem}`,
       valor: valorNum,
@@ -397,9 +395,6 @@ export default function App() {
     alert(`🔄 Transferência de R$ ${valorNum.toFixed(2)} de ${formTransferencia.bancoOrigem} para ${formTransferencia.bancoDestino} registrada!`);
   };
 
-  // ==========================================================================
-  // GESTÃO DE BANCOS E CARTÕES (CADASTRO E EDIÇÃO)
-  // ==========================================================================
   const salvarCartao = async (e) => {
     e.preventDefault();
     if (!cartaoForm.nome.trim() || !user) return;
@@ -474,9 +469,6 @@ export default function App() {
     await setDoc(doc(db, 'users', user.uid), { bancos: novaLista }, { merge: true });
   };
 
-  // ==========================================================================
-  // GESTÃO DE CONTAS A VENCER, A RECEBER E BAIXA ESCOLHENDO O BANCO
-  // ==========================================================================
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
     if (!formAgendamento.descricao || !formAgendamento.valor || !user) return;
@@ -570,9 +562,6 @@ export default function App() {
     });
   };
 
-  // ==========================================================================
-  // FUNÇÕES DA ABA CARTÃO DE CRÉDITO (PARCELADO E PAGAMENTO TOTAL / PARCIAL)
-  // ==========================================================================
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
     if (!novaCompraCartao.descricao || !novaCompraCartao.valorTotal || !user) return;
@@ -581,6 +570,7 @@ export default function App() {
     const valorTotal = parseFloat(novaCompraCartao.valorTotal);
     const valorParcela = Number((valorTotal / parcelasTotal).toFixed(2));
     const [anoBase, mesBase] = filtroMesAno.split('-').map(Number);
+    const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     for (let i = 0; i < parcelasTotal; i++) {
       const dParc = new Date(anoBase, (mesBase - 1) + i, 15);
@@ -597,6 +587,7 @@ export default function App() {
         subcategoria: novaCompraCartao.subcategoria || 'Geral',
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
+        grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
         pago: true,
         data_vencimento: `${anoM}-${mesM}-15`,
@@ -622,7 +613,6 @@ export default function App() {
     });
   };
 
-  // MELHORIA 4, 7 e 10: Confirma pagamento da fatura debitando da conta escolhida e gerando registro no Extrato
   const confirmarPagamentoFatura = async (e) => {
     e.preventDefault();
     if (!modalPagarFatura || !user) return;
@@ -690,27 +680,89 @@ export default function App() {
     setModalPagarFatura(null);
   };
 
+  const iniciarEdicaoTransacao = (t) => {
+    setTransacaoEditando(t);
+    setAplicarFuturasEdicao(false);
+  };
+
   const salvarEdicaoTransacao = async (e) => {
     e.preventDefault();
     if (!transacaoEditando || !user) return;
 
-    await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacaoEditando.id), {
-      descricao: transacaoEditando.descricao,
-      valor: Number(transacaoEditando.valor),
-      categoria: transacaoEditando.categoria,
-      subcategoria: transacaoEditando.subcategoria || 'Geral',
-      metodo: transacaoEditando.metodo,
-      data_vencimento: transacaoEditando.data_vencimento || hojeIso,
-      pago: Boolean(transacaoEditando.pago),
-      banco_nome: transacaoEditando.banco_nome || null,
-      cartao_nome: transacaoEditando.metodo === 'CREDITO' ? transacaoEditando.cartao_nome : null
-    });
+    const baseDescricao = transacaoEditando.descricao.replace(/\s\(\d+\/\d+\)$/, ''); 
+
+    if (aplicarFuturasEdicao && transacaoEditando.grupo_id) {
+      const batch = writeBatch(db);
+      const q = query(
+        collection(db, 'users', user.uid, 'transacoes'),
+        where('grupo_id', '==', transacaoEditando.grupo_id),
+        where('parcela_atual', '>=', transacaoEditando.parcela_atual)
+      );
+      
+      const snaps = await getDocs(q);
+      snaps.forEach(documento => {
+        const docData = documento.data();
+        batch.update(documento.ref, {
+          descricao: `${baseDescricao} (${docData.parcela_atual}/${docData.parcelas_total})`,
+          valor: Number(transacaoEditando.valor),
+          categoria: transacaoEditando.categoria,
+          subcategoria: transacaoEditando.subcategoria || 'Geral',
+          metodo: transacaoEditando.metodo,
+          pago: Boolean(transacaoEditando.pago),
+          banco_nome: transacaoEditando.banco_nome || null,
+          cartao_nome: transacaoEditando.metodo === 'CREDITO' ? transacaoEditando.cartao_nome : null
+        });
+      });
+      await batch.commit();
+    } else {
+      await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacaoEditando.id), {
+        descricao: transacaoEditando.descricao,
+        valor: Number(transacaoEditando.valor),
+        categoria: transacaoEditando.categoria,
+        subcategoria: transacaoEditando.subcategoria || 'Geral',
+        metodo: transacaoEditando.metodo,
+        data_vencimento: transacaoEditando.data_vencimento || hojeIso,
+        pago: Boolean(transacaoEditando.pago),
+        banco_nome: transacaoEditando.banco_nome || null,
+        cartao_nome: transacaoEditando.metodo === 'CREDITO' ? transacaoEditando.cartao_nome : null
+      });
+    }
     setTransacaoEditando(null);
   };
 
-  // ==========================================================================
-  // CATEGORIAS, SUBCATEGORIAS & ORÇAMENTOS (MELHORIA 9)
-  // ==========================================================================
+  const iniciarExclusaoTransacao = (t) => {
+    if (t.grupo_id && t.parcelas_total > 1) {
+      setTransacaoExcluindo(t);
+      setAplicarFuturasExclusao(false);
+    } else {
+      if(window.confirm('Tem certeza que deseja excluir este lançamento?')) {
+         deleteDoc(doc(db, 'users', user.uid, 'transacoes', t.id));
+      }
+    }
+  };
+
+  const confirmarExclusaoLote = async (e) => {
+    e.preventDefault();
+    if (!transacaoExcluindo || !user) return;
+    
+    if (aplicarFuturasExclusao && transacaoExcluindo.grupo_id) {
+      const batch = writeBatch(db);
+      const q = query(
+        collection(db, 'users', user.uid, 'transacoes'),
+        where('grupo_id', '==', transacaoExcluindo.grupo_id),
+        where('parcela_atual', '>=', transacaoExcluindo.parcela_atual)
+      );
+      const snaps = await getDocs(q);
+      snaps.forEach(documento => {
+        batch.delete(documento.ref);
+      });
+      await batch.commit();
+    } else {
+      await deleteDoc(doc(db, 'users', user.uid, 'transacoes', transacaoExcluindo.id));
+    }
+    setTransacaoExcluindo(null);
+  };
+
   const adicionarCategoria = async (e) => {
     e.preventDefault();
     if (!novaCatNome.trim() || !user) return;
@@ -755,9 +807,6 @@ export default function App() {
     await setDoc(doc(db, 'users', user.uid), { categorias: novasCats, orcamentos: novosOrcamentos }, { merge: true });
   };
 
-  // ==========================================================================
-  // SIMULADOR INTELIGENTE NO PAINEL (COM TODAS AS REGRAS DO WHATSAPP)
-  // ==========================================================================
   const extrairDataTextoSimulador = (texto) => {
     const anoAtual = dataAtualObj.getFullYear();
     const mesAtual = dataAtualObj.getMonth() + 1;
@@ -874,6 +923,7 @@ export default function App() {
       const pTotal = dados.parcelasTotal || 1;
       const catFinal = dados.categoria || 'Outros';
       const subFinal = dados.subcategoria || 'Geral';
+      const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
       for (let i = 0; i < pTotal; i++) {
         let anoMesItem = dados.anoMes || filtroMesAno;
@@ -898,6 +948,7 @@ export default function App() {
           subcategoria: subFinal,
           parcela_atual: i + 1,
           parcelas_total: pTotal,
+          grupo_id: pTotal > 1 ? grupoId : null,
           fatura_paga: false,
           pago: dados.pago !== undefined ? dados.pago : true,
           data_vencimento: dataVencItem,
@@ -973,7 +1024,6 @@ export default function App() {
     setProcessando(true);
 
     try {
-      // MELHORIA 6: Comando "teste"
       if (/^(teste|ping|status)$/i.test(txtLower)) {
         setHistoricoChat(prev => [...prev, { 
           autor: 'bot', 
@@ -983,7 +1033,6 @@ export default function App() {
         return;
       }
 
-      // 1. Verifica resposta pendente no Simulador (METODO, BANCO ou CATEGORIA)
       if (pendenteSimulador && pendenteSimulador.itens) {
         let atualizados = [...pendenteSimulador.itens];
 
@@ -1050,7 +1099,6 @@ export default function App() {
         setPendenteSimulador(null);
       }
 
-      // 2. Comando Desfazer
       if (/^(apagar|excluir|deletar|desfazer)/i.test(txtLower)) {
         if (transacoes.length === 0) {
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '⚠️ Nenhum lançamento para apagar.' }]);
@@ -1067,7 +1115,6 @@ export default function App() {
         return;
       }
 
-      // 3. Comandos de Contas a Vencer e Próximas do Vencimento (Até 5 dias)
       if (/proxima|proximas|5 dias/i.test(txtLower) && /conta|vencimento|vencer/i.test(txtLower)) {
         const hojeZero = new Date(hojeIso + 'T00:00:00');
         const limite5 = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
@@ -1100,7 +1147,6 @@ export default function App() {
         return;
       }
 
-      // 4. Lançamentos
       const textoNormalizado = textoUsuario.replace(/(\d+),(\d{2})/g, '$1.$2');
       const partes = textoNormalizado.split(/(?:,|\s+e\s+|\s*;\s*|\n+)/i).map(p => p.trim()).filter(Boolean);
       const itensExtraidos = partes.map(interpretarItemUnico).filter(Boolean);
@@ -1121,11 +1167,6 @@ export default function App() {
     } finally {
       setProcessando(false);
     }
-  };
-
-  const excluirTransacao = async (id) => {
-    if (!user) return;
-    await deleteDoc(doc(db, 'users', user.uid, 'transacoes', id));
   };
 
   if (carregandoAuth) {
@@ -1185,7 +1226,7 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS GERAIS, SALDOS POR CONTA (COM CHEQUE ESPECIAL), CARTÕES E EXTRATO
+  // CÁLCULOS GERAIS, SALDOS POR CONTA, CARTÕES E EXTRATO
   // ==========================================================================
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
   
@@ -1207,7 +1248,6 @@ export default function App() {
   const projecaoDespesasMes = isMesAtual ? gastoMedioDiario * totalDiasNoMes : totalDespesas;
   const projecaoSaldoFimMes = totalReceitas - projecaoDespesasMes;
 
-  // Cálculo de Saldos de cada Conta Bancária + Detecção de Cheque Especial (Melhoria 3)
   const saldosPorBanco = bancos.map((b, index) => {
     const entradasBanco = transacoes
       .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
@@ -1229,7 +1269,6 @@ export default function App() {
 
   const saldoTotalBancos = saldosPorBanco.reduce((acc, b) => acc + b.saldoAtualConta, 0);
 
-  // Cálculo detalhado dos Cartões de Crédito
   const resumoCartoes = cartoes.map(c => {
     const faturaMes = transacoesFiltradas
       .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga)
@@ -1256,7 +1295,6 @@ export default function App() {
     };
   });
 
-  // Construção do Extrato de Movimentação (Incluindo Linha Consolidada da Fatura + Pagamentos de Fatura)
   const faturasConsolidadasNoExtrato = resumoCartoes
     .filter(c => c.faturaMes > 0)
     .map(c => {
@@ -1290,9 +1328,8 @@ export default function App() {
     })
     .sort((a, b) => (b.data_vencimento || '').localeCompare(a.data_vencimento || ''));
 
-  // Filtros da Aba "Contas a Vencer e a Receber"
-  const hojeZero = new Date(hojeIso + 'T00:00:00');
-  const limite5Dias = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
+  const hojeZeroData = new Date(hojeIso + 'T00:00:00');
+  const limite5Dias = new Date(hojeZeroData.getTime() + 5 * 24 * 60 * 60 * 1000);
 
   const listaContasVencerReceber = transacoesFiltradas
     .filter(t => {
@@ -1303,11 +1340,11 @@ export default function App() {
       if (filtroVencStatus === 'PAGO' && t.pago === false) return false;
       if (filtroVencData === 'PROXIMOS_5_DIAS') {
         const dt = new Date((t.data_vencimento || hojeIso) + 'T00:00:00');
-        return dt >= hojeZero && dt <= limite5Dias;
+        return dt >= hojeZeroData && dt <= limite5Dias;
       }
       if (filtroVencData === 'VENCIDOS') {
         const dt = new Date((t.data_vencimento || hojeIso) + 'T00:00:00');
-        return dt < hojeZero && t.pago === false;
+        return dt < hojeZeroData && t.pago === false;
       }
       return true;
     })
@@ -1328,7 +1365,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col md:flex-row font-sans selection:bg-emerald-500 selection:text-slate-950">
       
-      {/* MODAL DE DAR BAIXA EM CONTA ESCOLHENDO O BANCO (MELHORIA 8) */}
+      {/* MODAL DE DAR BAIXA EM CONTA ESCOLHENDO O BANCO */}
       {modalBaixaConta && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
@@ -1382,7 +1419,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE PAGAMENTO TOTAL OU PARCIAL DA FATURA PERGUNTANDO A CONTA (MELHORIA 7 e 10) */}
+      {/* MODAL DE PAGAMENTO TOTAL OU PARCIAL DA FATURA */}
       {modalPagarFatura && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
@@ -1460,7 +1497,7 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL DE EDIÇÃO DE LANÇAMENTO (COM CATEGORIA E SUBCATEGORIA) */}
+      {/* MODAL DE EDIÇÃO DE LANÇAMENTO */}
       {transacaoEditando && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md space-y-4 shadow-2xl">
@@ -1472,6 +1509,23 @@ export default function App() {
                 <X className="w-5 h-5" />
               </button>
             </div>
+            
+            {/* NOVO CHECKBOX: APLICAR EM PARCELAS FUTURAS */}
+            {transacaoEditando.grupo_id && (
+              <div className="flex items-center gap-3 mt-2 p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+                <input 
+                  type="checkbox" 
+                  id="aplicarFuturas"
+                  checked={aplicarFuturasEdicao} 
+                  onChange={e => setAplicarFuturasEdicao(e.target.checked)}
+                  className="w-4 h-4 accent-amber-500 rounded cursor-pointer shrink-0"
+                />
+                <label htmlFor="aplicarFuturas" className="text-xs font-semibold text-amber-400 cursor-pointer">
+                  Alterar valor e categorias também nesta e em TODAS as parcelas futuras desta compra.
+                </label>
+              </div>
+            )}
+
             <form onSubmit={salvarEdicaoTransacao} className="space-y-3.5">
               <div>
                 <label className="text-xs text-slate-400 block mb-1">Descrição</label>
@@ -1579,6 +1633,60 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL DE EXCLUSÃO DE PARCELAS EM LOTE */}
+      {transacaoExcluindo && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-rose-500/30 rounded-2xl p-6 w-full max-w-sm space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-base text-rose-400 flex items-center gap-2">
+                <Trash2 className="w-5 h-5" /> Excluir Compra Parcelada
+              </h3>
+              <button onClick={() => setTransacaoExcluindo(null)} className="text-slate-400 hover:text-slate-200">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-3.5 bg-slate-950 border border-slate-800 rounded-xl text-center">
+              <p className="text-sm font-bold text-slate-200">{transacaoExcluindo.descricao}</p>
+              <p className="text-xs text-slate-400 mt-1">Parcela atual: {transacaoExcluindo.parcela_atual} de {transacaoExcluindo.parcelas_total}</p>
+            </div>
+            
+            <form onSubmit={confirmarExclusaoLote} className="space-y-4">
+              <div className="space-y-2">
+                <label className="flex items-center gap-3 p-3 border rounded-xl cursor-pointer transition bg-slate-950 border-slate-800 hover:border-slate-700">
+                  <input 
+                    type="radio" 
+                    name="tipoExclusao" 
+                    checked={!aplicarFuturasExclusao} 
+                    onChange={() => setAplicarFuturasExclusao(false)}
+                    className="accent-emerald-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span className="text-xs text-slate-300 font-medium">Excluir APENAS esta parcela</span>
+                </label>
+                <label className="flex items-center gap-3 p-3 border rounded-xl cursor-pointer transition bg-rose-500/10 border-rose-500/30 hover:border-rose-500/50">
+                  <input 
+                    type="radio" 
+                    name="tipoExclusao" 
+                    checked={aplicarFuturasExclusao} 
+                    onChange={() => setAplicarFuturasExclusao(true)}
+                    className="accent-rose-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span className="text-xs text-rose-300 font-medium">Excluir esta e TODAS AS FUTURAS</span>
+                </label>
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button type="submit" className="flex-1 bg-rose-500 hover:bg-rose-400 text-white font-semibold py-2.5 rounded-xl text-xs transition">
+                  Confirmar Exclusão
+                </button>
+                <button type="button" onClick={() => setTransacaoExcluindo(null)} className="px-4 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-xs transition">
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* SIDEBAR MODERNA */}
       <aside className="w-full md:w-72 bg-slate-900/50 backdrop-blur-xl border-r border-slate-800/80 p-6 flex flex-col justify-between">
         <div>
@@ -1658,7 +1766,7 @@ export default function App() {
         
         <div className="lg:col-span-2 space-y-6">
 
-          {/* MELHORIA 5: SELETOR GLOBAL DE MÊS VISÍVEL EM TODAS AS ABAS COM SETAS RÁPIDAS */}
+          {/* SELETOR GLOBAL DE MÊS VISÍVEL EM TODAS AS ABAS */}
           <div className="bg-slate-900/70 backdrop-blur-xl border border-slate-800/80 p-3.5 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-3 shadow-xl">
             <div className="flex items-center gap-2 text-slate-200 text-xs font-semibold">
               <Calendar className="w-4 h-4 text-emerald-400" />
@@ -1723,7 +1831,7 @@ export default function App() {
             </div>
           )}
 
-          {/* MELHORIA 3: BANNER DE ALERTA DE USO DO CHEQUE ESPECIAL (SALDO NEGATIVO) */}
+          {/* BANNER DE ALERTA DE USO DO CHEQUE ESPECIAL */}
           {saldosPorBanco.filter(b => b.emChequeEspecial).map(b => (
             <div key={b.id} className="p-4 rounded-2xl border bg-rose-500/15 border-rose-500/50 flex items-center justify-between gap-4 shadow-xl">
               <div className="flex items-center gap-3">
@@ -1921,7 +2029,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 2: MOVIMENTAÇÃO (EXTRATO + PAGAMENTO DE FATURA + SUBCATEGORIA)
+              ABA 2: MOVIMENTAÇÃO (EXTRATO)
           ================================================================ */}
           {abaAtiva === 'movimentacao' && (
             <div className="space-y-6">
@@ -1934,7 +2042,6 @@ export default function App() {
                 </p>
               </div>
 
-              {/* BARRA DE PESQUISA E FILTROS DO EXTRATO */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
                 <div className="relative">
                   <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3" />
@@ -1950,7 +2057,7 @@ export default function App() {
                     { id: 'RECEITA', label: '🟢 Entradas' },
                     { id: 'DESPESA', label: '🔴 Saídas (Pix/Débito)' },
                     { id: 'CREDITO', label: '💳 Compras no Crédito' },
-                    { id: 'FATURA', label: '📅 Faturas & Pagamentos de Fatura' }
+                    { id: 'FATURA', label: '📅 Faturas & Pagamentos' }
                   ].map(f => (
                     <button
                       key={f.id} onClick={() => setFiltroTipoExtrato(f.id)}
@@ -1962,7 +2069,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* LISTA ESTILO EXTRATO */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3 shadow-xl">
                 {listaMovimentacaoExtrato.length === 0 ? (
                   <p className="text-sm text-slate-500 py-8 text-center">Nenhuma movimentação encontrada para este filtro.</p>
@@ -2021,10 +2127,10 @@ export default function App() {
                         </span>
                         {!item.isLinhaFatura && (
                           <>
-                            <button onClick={() => setTransacaoEditando(item)} className="text-slate-400 hover:text-sky-400 p-1">
+                            <button onClick={() => iniciarEdicaoTransacao(item)} className="text-slate-400 hover:text-sky-400 p-1">
                               <Edit3 className="w-4 h-4" />
                             </button>
-                            <button onClick={() => excluirTransacao(item.id)} className="text-slate-500 hover:text-rose-400 p-1">
+                            <button onClick={() => iniciarExclusaoTransacao(item)} className="text-slate-500 hover:text-rose-400 p-1">
                               <Trash2 className="w-4 h-4" />
                             </button>
                           </>
@@ -2056,7 +2162,7 @@ export default function App() {
                     onClick={dispararTesteAlertaWhatsApp}
                     className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
                   >
-                    <BellRing className="w-3.5 h-3.5" /> Testar Alerta no WhatsApp
+                    <BellRing className="w-3.5 h-3.5" /> Testar Alerta
                   </button>
                 </div>
 
@@ -2100,7 +2206,6 @@ export default function App() {
                 </form>
               </div>
 
-              {/* FILTROS POR NOME, CATEGORIA, VENCIMENTO E STATUS */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-4 rounded-2xl grid grid-cols-1 sm:grid-cols-4 gap-3 shadow-xl">
                 <input 
                   type="text" placeholder="🔍 Filtrar por nome..." value={filtroVencNome}
@@ -2132,7 +2237,6 @@ export default function App() {
                 </select>
               </div>
 
-              {/* LISTA DE CONTAS A VENCER E A RECEBER */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3 shadow-xl">
                 {listaContasVencerReceber.length === 0 ? (
                   <p className="text-sm text-slate-500 py-8 text-center">Nenhuma conta encontrada para os filtros selecionados.</p>
@@ -2166,10 +2270,10 @@ export default function App() {
                         >
                           {t.pago ? <><CheckCircle2 className="w-3.5 h-3.5" /> Pago</> : <><Zap className="w-3.5 h-3.5" /> Dar Baixa</>}
                         </button>
-                        <button onClick={() => setTransacaoEditando(t)} className="text-slate-400 hover:text-sky-400 p-1">
+                        <button onClick={() => iniciarEdicaoTransacao(t)} className="text-slate-400 hover:text-sky-400 p-1">
                           <Edit3 className="w-4 h-4" />
                         </button>
-                        <button onClick={() => excluirTransacao(t.id)} className="text-slate-500 hover:text-rose-400 p-1">
+                        <button onClick={() => iniciarExclusaoTransacao(t)} className="text-slate-500 hover:text-rose-400 p-1">
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
@@ -2178,11 +2282,10 @@ export default function App() {
                 )}
               </div>
 
-              {/* LEMBRETES FIXOS RECORRENTES TODO MÊS */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <div>
                   <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-                    <BellRing className="w-4 h-4 text-emerald-400" /> Lembretes Fixos Mensais no WhatsApp (Ex: Todo dia 15 Energia)
+                    <BellRing className="w-4 h-4 text-emerald-400" /> Lembretes Fixos Mensais no WhatsApp
                   </h3>
                 </div>
                 <form onSubmit={adicionarContaFixa} className="grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -2219,7 +2322,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 4: SALDOS DAS CONTAS BANCÁRIAS & TRANSFERÊNCIAS (MELHORIA 1 e 3)
+              ABA 4: SALDOS & TRANSFERÊNCIAS
           ================================================================ */}
           {abaAtiva === 'saldos' && (
             <div className="space-y-6">
@@ -2241,7 +2344,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* FORMULÁRIO DE TRANSFERÊNCIA ENTRE CONTAS BANCÁRIAS */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                   <ArrowRightLeft className="w-4 h-4 text-sky-400" /> Transferência entre Contas Bancárias
@@ -2332,7 +2434,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 5: CARTÃO DE CRÉDITO COMPLETA
+              ABA 5: CARTÃO DE CRÉDITO
           ================================================================ */}
           {abaAtiva === 'cartoes' && (
             <div className="space-y-6">
@@ -2364,7 +2466,7 @@ export default function App() {
                         onClick={() => abrirModalPagamentoFatura(c)}
                         className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs px-3.5 py-2 rounded-xl transition shadow-md shadow-emerald-500/10"
                       >
-                        Pagar Fatura (Total/Parcial)
+                        Pagar Fatura
                       </button>
                     </div>
 
@@ -2403,7 +2505,6 @@ export default function App() {
                 ))}
               </div>
 
-              {/* LANÇAR COMPRA PARCELADA COM CATEGORIA E SUBCATEGORIA */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                   <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra no Cartão (À Vista ou Parcelada)
@@ -2460,7 +2561,6 @@ export default function App() {
                 </form>
               </div>
 
-              {/* FATURA DETALHADA */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                   <h3 className="text-sm font-bold text-slate-200">
@@ -2501,10 +2601,10 @@ export default function App() {
                           <span className={`font-bold text-sm ${Number(t.valor) < 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                             R$ {Number(t.valor).toFixed(2)}
                           </span>
-                          <button onClick={() => setTransacaoEditando(t)} className="text-slate-400 hover:text-sky-400 p-1">
+                          <button onClick={() => iniciarEdicaoTransacao(t)} className="text-slate-400 hover:text-sky-400 p-1">
                             <Edit3 className="w-4 h-4" />
                           </button>
-                          <button onClick={() => excluirTransacao(t.id)} className="text-slate-500 hover:text-rose-400 p-1">
+                          <button onClick={() => iniciarExclusaoTransacao(t)} className="text-slate-500 hover:text-rose-400 p-1">
                             <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
@@ -2516,7 +2616,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 6: CADASTRO DE BANCOS E CARTÕES (COM EDIÇÃO E SALDO INICIAL)
+              ABA 6: CADASTRO DE BANCOS E CARTÕES
           ================================================================ */}
           {abaAtiva === 'bancos' && (
             <div className="space-y-6">
@@ -2594,7 +2694,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* CADASTRO / EDIÇÃO DE BANCOS & SALDO INICIAL */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-5 shadow-xl">
                 <div>
                   <h2 className="text-lg font-bold flex items-center gap-2">
@@ -2665,7 +2764,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 7: CATEGORIAS, SUBCATEGORIAS & LIMITES (MELHORIA 9)
+              ABA 7: CATEGORIAS, SUBCATEGORIAS & LIMITES
           ================================================================ */}
           {abaAtiva === 'categorias' && (
             <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-6 shadow-xl">
