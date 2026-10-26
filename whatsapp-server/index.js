@@ -19,6 +19,10 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 const db = admin.firestore();
 const app = express();
+
+app.use(cors());
+app.use(express.json());
+
 // Middleware de Segurança (API Key)
 const validarApiKey = (req, res, next) => {
   const chaveRecebida = req.headers['x-api-key'];
@@ -29,11 +33,6 @@ const validarApiKey = (req, res, next) => {
   }
   next();
 };
-app.use(cors());
-app.use(express.json());
-app.get('/verificar-alertas', validarApiKey, async (req, res) => { ... });
-app.post('/conectar', validarApiKey, async (req, res) => { ... });
-app.post('/desconectar', validarApiKey, async (req, res) => { ... });
 
 const sessions = new Map();
 const userJids = new Map();
@@ -64,12 +63,12 @@ app.get('/', (req, res) => {
   res.status(200).send('OK');
 });
 
-app.get('/verificar-alertas', async (req, res) => {
+app.get('/verificar-alertas', validarApiKey, async (req, res) => {
   await verificarAlertasVencimento(true);
   res.status(200).send('OK - Alertas verificados');
 });
 
-app.post('/conectar', async (req, res) => {
+app.post('/conectar', validarApiKey, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
 
@@ -96,7 +95,7 @@ app.post('/conectar', async (req, res) => {
   }
 });
 
-app.post('/desconectar', async (req, res) => {
+app.post('/desconectar', validarApiKey, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
 
@@ -337,7 +336,7 @@ async function startWhatsAppForUser(userId) {
 }
 
 // ============================================================================
-// 4. ALERTA AUTOMÁTICO NO WHATSAPP DE VENCIMENTO DE CONTAS E FATURAS
+// 4. ALERTA AUTOMÁTICO NO WHATSAPP
 // ============================================================================
 async function verificarAlertasVencimento(forcarDisparoManual = false) {
   try {
@@ -380,7 +379,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
             t => (t.conta_fixa_id === cf.id || semAcento(t.descricao).includes(semAcento(cf.nome))) && t.pago !== false
           );
           if (!jaPaga) {
-            avisos.push(`• *${cf.nome}* (Conta Fixa) — R$ ${Number(cf.valorPadrao || 0).toFixed(2)}`);
+            avisos.push(`• *${cf.nome} (Conta Fixa) — R$ ${Number(cf.valorPadrao || 0).toFixed(2)}*`);
           }
         }
       }
@@ -389,7 +388,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
         t => t.pago === false && t.data_vencimento === dataHojeStr
       );
       for (const ag of agendadasHoje) {
-        avisos.push(`• *${ag.descricao}* (${ag.tipo === 'RECEITA' ? 'A Receber' : 'A Pagar'}) — R$ ${Number(ag.valor || 0).toFixed(2)}`);
+        avisos.push(`• *${ag.descricao} (${ag.tipo === 'RECEITA' ? 'A Receber' : 'A Pagar'}) — R$ ${Number(ag.valor || 0).toFixed(2)}*`);
       }
 
       for (const c of cartoes) {
@@ -398,7 +397,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
             .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(c.nome) && !t.fatura_paga)
             .reduce((a, b) => a + Number(b.valor || 0), 0);
           if (faturaMes > 0) {
-            avisos.push(`• *Fatura Cartão ${c.nome}* — R$ ${faturaMes.toFixed(2)}`);
+            avisos.push(`• *Fatura Cartão ${c.nome} — R$ ${faturaMes.toFixed(2)}*`);
           }
         }
       }
@@ -426,7 +425,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 setInterval(() => verificarAlertasVencimento(false), 30 * 60 * 1000);
 
 // ============================================================================
-// 5. EXTRAÇÃO INTELIGENTE DE DATA E DE CATEGORIA + MOTOR DE APRENDIZADO
+// 5. EXTRAÇÃO INTELIGENTE DE DADOS
 // ============================================================================
 function extrairDataVencimento(texto) {
   const hoje = new Date();
@@ -547,7 +546,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
 }
 
 // ============================================================================
-// 6. GRAVAÇÃO NO FIRESTORE + ALERTAS DE CARTÃO E CHEQUE ESPECIAL
+// 6. GRAVAÇÃO NO FIRESTORE COM GRUPO DE PARCELAS
 // ============================================================================
 async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
   const hoje = new Date();
@@ -563,7 +562,6 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
     const isAgendado = item.pago === false;
     const catFinal = item.categoria || 'Outros';
     const subFinal = item.subcategoria || 'Geral';
-    // Gera o ID único para vincular todas as parcelas desta compra
     const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
@@ -591,7 +589,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         subcategoria: subFinal,
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
-        grupo_id: parcelasTotal > 1 ? grupoId : null, // Adiciona o vínculo no banco
+        grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
         pago: item.pago !== undefined ? item.pago : true,
         data_vencimento: dataVencItem,
@@ -676,7 +674,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 }
 
 // ============================================================================
-// 7. FILA DE PENDÊNCIAS COM CONSULTA PRÉVIA DE REGRAS APRENDIDAS
+// 7. FILA DE PENDÊNCIAS
 // ============================================================================
 async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
   const userRef = db.collection('users').doc(userId);
@@ -908,6 +906,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
           return;
         }
+        setPendenteSimulador(null);
       }
     }
 
@@ -968,7 +967,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
     }
 
-    // Dar baixa em contas pelo WhatsApp
+    // Dar baixa em contas
     const isComandoBaixa = /^(paguei|dar baixa|baixa|quitei|pagar fatura)/i.test(txtLimpo) && !/\b\d+[,\.]\d{2}\b/.test(textoUsuario);
     if (isComandoBaixa) {
       const snapMes = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
@@ -1015,11 +1014,9 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
     }
 
-    // Injeção da variável transacoesFiltradas
     const snapMesGeral = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
     const transacoesFiltradas = snapMesGeral.docs.map(d => d.data());
 
-    // Consultas de Contas a Vencer
     if (/proxima|proximas|5 dias/i.test(txtLimpo) && /conta|vencimento|vencer/i.test(txtLimpo)) {
       const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
       const hojeZero = new Date(hojeStr + 'T00:00:00');
@@ -1037,13 +1034,15 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       return;
     }
 
-    // Consultor Geral
     const isPergunta = /\?|quanto|qual|resumo|saldo|saldos|fatura|limite/i.test(txtLimpo) && !/gastei|comprei|paguei|recebi|vence/i.test(txtLimpo);
     if (isPergunta) {
       const transMes = transacoesFiltradas;
       const rec = transMes.filter(t => t.tipo === 'RECEITA' && t.pago !== false).reduce((a, b) => a + Number(b.valor || 0), 0);
       const desp = transMes.filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'PAGAMENTO_FATURA').reduce((a, b) => a + Number(b.valor || 0), 0);
-      await enviarMensagemSegura(sock, remoteJid, { text: `📊 *Resumo FinZap (${anoMesAtual})*\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Resultado: R$ ${(rec - desp).toFixed(2)}*` });
+      const resultadoFinal = rec - desp;
+      await enviarMensagemSegura(sock, remoteJid, { 
+        text: `📊 *Resumo FinZap (${anoMesAtual})*\n🟢 Receitas: R$ ${rec.toFixed(2)}\n🔴 Despesas: R$ ${desp.toFixed(2)}\n💰 *Resultado: R$ ${resultadoFinal.toFixed(2)}*` 
+      });
       return;
     }
 
