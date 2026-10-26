@@ -19,8 +19,21 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 const db = admin.firestore();
 const app = express();
+// Middleware de Segurança (API Key)
+const validarApiKey = (req, res, next) => {
+  const chaveRecebida = req.headers['x-api-key'];
+  const chaveServidor = process.env.API_SECRET_KEY || 'FinZapKey2026';
+  
+  if (!chaveRecebida || chaveRecebida !== chaveServidor) {
+    return res.status(401).json({ error: 'Acesso negado. Chave de API inválida.' });
+  }
+  next();
+};
 app.use(cors());
 app.use(express.json());
+app.get('/verificar-alertas', validarApiKey, async (req, res) => { ... });
+app.post('/conectar', validarApiKey, async (req, res) => { ... });
+app.post('/desconectar', validarApiKey, async (req, res) => { ... });
 
 const sessions = new Map();
 const userJids = new Map();

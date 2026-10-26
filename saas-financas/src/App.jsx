@@ -25,6 +25,7 @@ import {
 } from 'recharts';
 
 const RENDER_API_URL = 'https://financeiro-saas-production-66cc.up.railway.app';
+const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'FinZapKey2026';
 
 const formatarDataBR = (isoDate) => {
   if (!isoDate || !isoDate.includes('-')) return isoDate || '-';
@@ -313,7 +314,10 @@ export default function App() {
     try {
       await fetch(`${RENDER_API_URL}/conectar`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-api-key': API_SECRET_KEY 
+        },
         body: JSON.stringify({ userId: user.uid })
       });
     } catch (e) {
@@ -328,7 +332,10 @@ export default function App() {
     try {
       await fetch(`${RENDER_API_URL}/desconectar`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-api-key': API_SECRET_KEY 
+        },
         body: JSON.stringify({ userId: user.uid })
       });
       setWhatsappStatus('DISCONNECTED');
@@ -340,7 +347,12 @@ export default function App() {
 
   const dispararTesteAlertaWhatsApp = async () => {
     try {
-      await fetch(`${RENDER_API_URL}/verificar-alertas`);
+      await fetch(`${RENDER_API_URL}/verificar-alertas`, {
+        method: 'GET',
+        headers: {
+          'x-api-key': API_SECRET_KEY
+        }
+      });
       alert('🔔 O comando de verificação de alertas foi acionado!');
     } catch (e) {
       alert('Erro ao acionar verificação no servidor.');
@@ -1228,7 +1240,7 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS GERAIS E DADOS DO GRÁFICO (AGORA COM DRILL-DOWN)
+  // CÁLCULOS GERAIS E DADOS DO GRÁFICO (COM DRILL-DOWN)
   // ==========================================================================
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
   
@@ -1352,7 +1364,6 @@ export default function App() {
     })
     .sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
 
-  // Lógica do Gráfico de Drill-Down
   let dadosGraficoDespesas = [];
   if (!categoriaSelecionadaGrafico) {
     dadosGraficoDespesas = categorias.map(cat => {
@@ -1530,7 +1541,6 @@ export default function App() {
               </button>
             </div>
             
-            {/* CHECKBOX: APLICAR EM PARCELAS FUTURAS */}
             {transacaoEditando.grupo_id && (
               <div className="flex items-center gap-3 mt-2 p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl">
                 <input 
@@ -2009,7 +2019,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* GRÁFICOS (AGORA COM DRILL-DOWN CATEGORIA > SUBCATEGORIA) */}
+              {/* GRÁFICOS (COM DRILL-DOWN CATEGORIA > SUBCATEGORIA) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col items-center shadow-xl">
                   <div className="w-full flex justify-between items-center mb-3">
