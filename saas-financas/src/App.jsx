@@ -120,7 +120,7 @@ export default function App() {
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
   const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
 
-  // Estados de Formulários - Categorias, Subcategorias e Lembretes Fixos
+  // Estados de Formulários
   const [novaCatNome, setNovaCatNome] = useState('');
   const [catSelecionadaParaSub, setCatSelecionadaParaSub] = useState('Alimentação');
   const [novaSubNome, setNovaSubNome] = useState('');
@@ -130,11 +130,9 @@ export default function App() {
   const [fixaValor, setFixaValor] = useState('');
   const [fixaDia, setFixaDia] = useState('');
 
-  // Estados de Formulários - Cadastro e Edição de Cartões e Bancos
   const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
 
-  // Estado de Transferência entre Contas
   const [formTransferencia, setFormTransferencia] = useState({
     bancoOrigem: 'Itaú',
     bancoDestino: 'Nubank Conta',
@@ -142,7 +140,6 @@ export default function App() {
     data: hojeIso
   });
 
-  // Estados da Aba "Contas a Vencer & Receber"
   const [formAgendamento, setFormAgendamento] = useState({
     descricao: '',
     valor: '',
@@ -160,17 +157,21 @@ export default function App() {
 
   const [modalBaixaConta, setModalBaixaConta] = useState(null);
 
-  // Estados da Aba "Movimentação (Extrato)"
   const [pesquisaExtrato, setPesquisaExtrato] = useState('');
   const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
 
-  // Estados da Aba Cartão de Crédito & Modais
+  // Controle do Gráfico Drill-down
+  const [categoriaSelecionadaGrafico, setCategoriaSelecionadaGrafico] = useState(null);
+
+  // Estados para Lançamento Flexível
   const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
   const [novaCompraCartao, setNovaCompraCartao] = useState({
     descricao: '',
     valorTotal: '',
     parcelas: '1',
+    metodo: 'CREDITO', 
     cartaoNome: 'VISA',
+    bancoNome: 'Itaú',
     categoria: 'Alimentação',
     subcategoria: 'Lazer'
   });
@@ -182,7 +183,7 @@ export default function App() {
   const [transacaoExcluindo, setTransacaoExcluindo] = useState(null);
   const [aplicarFuturasExclusao, setAplicarFuturasExclusao] = useState(false);
 
-  // Estados do Simulador de WhatsApp
+  // Simulador de WhatsApp
   const [msgWhats, setMsgWhats] = useState('');
   const [pendenteSimulador, setPendenteSimulador] = useState(null);
   const [historicoChat, setHistoricoChat] = useState([
@@ -193,7 +194,7 @@ export default function App() {
   ]);
   const [processando, setProcessando] = useState(false);
 
-  const CORES_GRAFICO = ['#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa', '#2dd4bf', '#fb7185', '#60a5fa'];
+  const CORES_GRAFICO = ['#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa', '#2dd4bf', '#fb7185', '#60a5fa', '#94a3b8', '#c084fc'];
 
   const alterarMesCompetencia = (delta) => {
     const [ano, mes] = filtroMesAno.split('-').map(Number);
@@ -203,7 +204,6 @@ export default function App() {
     setFiltroMesAno(`${novoAno}-${novoMes}`);
   };
 
-  // 1. Autenticação e Carregamento Inicial
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
@@ -237,7 +237,6 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Listeners em Tempo Real
   useEffect(() => {
     if (!user) {
       setTransacoes([]);
@@ -562,6 +561,7 @@ export default function App() {
     });
   };
 
+  // Lógica Flexível de Lançamento (Cartão, PIX, Dinheiro, Carnê)
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
     if (!novaCompraCartao.descricao || !novaCompraCartao.valorTotal || !user) return;
@@ -571,6 +571,7 @@ export default function App() {
     const valorParcela = Number((valorTotal / parcelasTotal).toFixed(2));
     const [anoBase, mesBase] = filtroMesAno.split('-').map(Number);
     const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const isCredito = novaCompraCartao.metodo === 'CREDITO';
 
     for (let i = 0; i < parcelasTotal; i++) {
       const dParc = new Date(anoBase, (mesBase - 1) + i, 15);
@@ -581,23 +582,24 @@ export default function App() {
         descricao: parcelasTotal > 1 ? `${novaCompraCartao.descricao} (${i + 1}/${parcelasTotal})` : novaCompraCartao.descricao,
         valor: valorParcela,
         tipo: 'DESPESA',
-        metodo: 'CREDITO',
-        cartao_nome: novaCompraCartao.cartaoNome,
+        metodo: novaCompraCartao.metodo,
+        cartao_nome: isCredito ? novaCompraCartao.cartaoNome : null,
+        banco_nome: !isCredito ? novaCompraCartao.bancoNome : null,
         categoria: novaCompraCartao.categoria,
         subcategoria: novaCompraCartao.subcategoria || 'Geral',
         parcela_atual: i + 1,
         parcelas_total: parcelasTotal,
         grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
-        pago: true,
+        pago: isCredito, 
         data_vencimento: `${anoM}-${mesM}-15`,
         anoMes: `${anoM}-${mesM}`,
-        mensagem_original: `Lançamento manual no cartão ${novaCompraCartao.cartaoNome}`,
+        mensagem_original: `Lançamento manual parcelado`,
         criadoEm: serverTimestamp()
       });
     }
 
-    setNovaCompraCartao({ ...novaCompraCartao, descricao: '', valorTotal: '', parcelas: '1' });
+    setNovaCompraCartao({ ...novaCompraCartao, descricao: '', valorTotal: '', parcelas: '1', metodo: 'CREDITO' });
   };
 
   const abrirModalPagamentoFatura = (cartaoObj) => {
@@ -1226,7 +1228,7 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS GERAIS, SALDOS POR CONTA, CARTÕES E EXTRATO
+  // CÁLCULOS GERAIS E DADOS DO GRÁFICO (AGORA COM DRILL-DOWN)
   // ==========================================================================
   const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
   
@@ -1350,12 +1352,30 @@ export default function App() {
     })
     .sort((a, b) => (a.data_vencimento || '').localeCompare(b.data_vencimento || ''));
 
-  const despesasPorCategoria = categorias.map(cat => {
-    const total = transacoesFiltradas
-      .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
-      .reduce((acc, t) => acc + Number(t.valor || 0), 0);
-    return { name: cat, value: total };
-  }).filter(item => item.value > 0);
+  // Lógica do Gráfico de Drill-Down
+  let dadosGraficoDespesas = [];
+  if (!categoriaSelecionadaGrafico) {
+    dadosGraficoDespesas = categorias.map(cat => {
+      const total = transacoesFiltradas
+        .filter(t => t.tipo === 'DESPESA' && t.categoria === cat && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA')
+        .reduce((acc, t) => acc + Number(t.valor || 0), 0);
+      return { name: cat, value: total };
+    }).filter(item => item.value > 0);
+  } else {
+    const transacoesDaCategoria = transacoesFiltradas
+      .filter(t => t.tipo === 'DESPESA' && t.categoria === categoriaSelecionadaGrafico && t.metodo !== 'PAGAMENTO_FATURA' && t.metodo !== 'TRANSFERENCIA');
+    
+    const subsMap = {};
+    transacoesDaCategoria.forEach(t => {
+      const sub = t.subcategoria || 'Geral';
+      subsMap[sub] = (subsMap[sub] || 0) + Number(t.valor || 0);
+    });
+    
+    dadosGraficoDespesas = Object.keys(subsMap).map(sub => ({
+      name: sub,
+      value: subsMap[sub]
+    })).filter(item => item.value > 0);
+  }
 
   const dadosCartoesGrafico = resumoCartoes.map(c => ({
     name: c.nome,
@@ -1510,7 +1530,7 @@ export default function App() {
               </button>
             </div>
             
-            {/* NOVO CHECKBOX: APLICAR EM PARCELAS FUTURAS */}
+            {/* CHECKBOX: APLICAR EM PARCELAS FUTURAS */}
             {transacaoEditando.grupo_id && (
               <div className="flex items-center gap-3 mt-2 p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl">
                 <input 
@@ -1989,18 +2009,41 @@ export default function App() {
                 </div>
               </div>
 
-              {/* GRÁFICOS */}
+              {/* GRÁFICOS (AGORA COM DRILL-DOWN CATEGORIA > SUBCATEGORIA) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col items-center shadow-xl">
-                  <h2 className="text-sm font-semibold text-slate-200 mb-3 w-full text-left">Despesas por Categoria</h2>
-                  {despesasPorCategoria.length === 0 ? (
+                  <div className="w-full flex justify-between items-center mb-3">
+                    <h2 className="text-sm font-semibold text-slate-200">
+                      {categoriaSelecionadaGrafico ? `Detalhes: ${categoriaSelecionadaGrafico}` : 'Despesas por Categoria'}
+                    </h2>
+                    {categoriaSelecionadaGrafico && (
+                      <button 
+                        onClick={() => setCategoriaSelecionadaGrafico(null)}
+                        className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded-lg transition font-bold"
+                      >
+                        ← Voltar
+                      </button>
+                    )}
+                  </div>
+                  
+                  {dadosGraficoDespesas.length === 0 ? (
                     <div className="h-48 flex items-center justify-center text-xs text-slate-500">Sem despesas registradas</div>
                   ) : (
-                    <div className="w-full h-48">
+                    <div className="w-full h-48 relative">
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
-                          <Pie data={despesasPorCategoria} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={60} label>
-                            {despesasPorCategoria.map((entry, index) => (
+                          <Pie 
+                            data={dadosGraficoDespesas} 
+                            dataKey="value" 
+                            nameKey="name" 
+                            cx="50%" cy="50%" outerRadius={60} 
+                            label 
+                            onClick={(data) => {
+                              if (!categoriaSelecionadaGrafico) setCategoriaSelecionadaGrafico(data.name);
+                            }}
+                            style={{ cursor: !categoriaSelecionadaGrafico ? 'pointer' : 'default' }}
+                          >
+                            {dadosGraficoDespesas.map((entry, index) => (
                               <Cell key={`cell-${index}`} fill={CORES_GRAFICO[index % CORES_GRAFICO.length]} />
                             ))}
                           </Pie>
@@ -2008,6 +2051,9 @@ export default function App() {
                         </PieChart>
                       </ResponsiveContainer>
                     </div>
+                  )}
+                  {!categoriaSelecionadaGrafico && dadosGraficoDespesas.length > 0 && (
+                    <p className="text-[10px] text-emerald-500/70 mt-2 animate-pulse font-medium">💡 Clique numa fatia para ver os detalhes</p>
                   )}
                 </div>
 
@@ -2434,7 +2480,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 5: CARTÃO DE CRÉDITO
+              ABA 5: CARTÃO DE CRÉDITO & LANÇAMENTOS FLEXÍVEIS
           ================================================================ */}
           {abaAtiva === 'cartoes' && (
             <div className="space-y-6">
@@ -2505,9 +2551,10 @@ export default function App() {
                 ))}
               </div>
 
+              {/* FORMULÁRIO DE LANÇAMENTO FLEXÍVEL (CARTÃO, PIX, BOLETO, DINHEIRO) */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-                  <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra no Cartão (À Vista ou Parcelada)
+                  <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra (À Vista ou Parcelada)
                 </h3>
                 <form onSubmit={lancarCompraCartaoManual} className="grid grid-cols-1 sm:grid-cols-6 gap-3">
                   <input 
@@ -2518,45 +2565,69 @@ export default function App() {
                   <input 
                     type="number" step="0.01" required placeholder="Valor Total (R$)" value={novaCompraCartao.valorTotal}
                     onChange={e => setNovaCompraCartao({ ...novaCompraCartao, valorTotal: e.target.value })}
-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   />
                   <select 
                     value={novaCompraCartao.parcelas}
                     onChange={e => setNovaCompraCartao({ ...novaCompraCartao, parcelas: e.target.value })}
-                    className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
                     {[1,2,3,4,5,6,7,8,9,10,12,18,24].map(n => (
                       <option key={n} value={n}>{n}x {n === 1 ? '(À vista)' : 'parcelas'}</option>
                     ))}
                   </select>
+
                   <select 
-                    value={novaCompraCartao.cartaoNome}
-                    onChange={e => setNovaCompraCartao({ ...novaCompraCartao, cartaoNome: e.target.value })}
+                    value={novaCompraCartao.metodo}
+                    onChange={e => setNovaCompraCartao({ ...novaCompraCartao, metodo: e.target.value })}
                     className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
-                    {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
+                    <option value="CREDITO">💳 Cartão de Crédito</option>
+                    <option value="PIX">💠 Parcelamento no PIX</option>
+                    <option value="DINHEIRO">💵 Dinheiro</option>
+                    <option value="BOLETO / AGENDADO">📄 Carnê / Boleto</option>
                   </select>
+
+                  {novaCompraCartao.metodo === 'CREDITO' ? (
+                    <select 
+                      value={novaCompraCartao.cartaoNome}
+                      onChange={e => setNovaCompraCartao({ ...novaCompraCartao, cartaoNome: e.target.value })}
+                      className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    >
+                      {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
+                    </select>
+                  ) : (
+                    <select 
+                      value={novaCompraCartao.bancoNome}
+                      onChange={e => setNovaCompraCartao({ ...novaCompraCartao, bancoNome: e.target.value })}
+                      className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    >
+                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                    </select>
+                  )}
+
                   <select 
                     value={novaCompraCartao.categoria}
                     onChange={e => {
                       const cat = e.target.value;
                       setNovaCompraCartao({ ...novaCompraCartao, categoria: cat, subcategoria: (subcategorias[cat] || ['Geral'])[0] });
                     }}
-                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    className="sm:col-span-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
                     {categorias.filter(c => c !== 'Receita').map(cat => <option key={cat} value={cat}>{cat}</option>)}
                   </select>
                   <select 
                     value={novaCompraCartao.subcategoria}
                     onChange={e => setNovaCompraCartao({ ...novaCompraCartao, subcategoria: e.target.value })}
-                    className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
+                    className="sm:col-span-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                   >
                     {(subcategorias[novaCompraCartao.categoria] || ['Geral']).map(sub => (
                       <option key={sub} value={sub}>{sub}</option>
                     ))}
                   </select>
-                  <button type="submit" className="sm:col-span-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
-                    Lançar na Fatura
+                  
+                  <button type="submit" className="sm:col-span-6 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold py-2.5 rounded-xl text-xs transition">
+                    {novaCompraCartao.metodo === 'CREDITO' ? 'Lançar na Fatura' : 'Agendar Parcelas (A Vencer)'}
                   </button>
                 </form>
               </div>
