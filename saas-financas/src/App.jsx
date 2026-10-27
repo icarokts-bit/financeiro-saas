@@ -882,7 +882,7 @@ export default function App() {
     }
 
     if (!metodo) {
-      if (/crédito|credito|cartão|cartao/i.test(txtLower) || parcelasTotal > 1) {
+      if (/crédito|credito|cartão|cartao/i.test(txtLower)) {
         metodo = 'CREDITO';
         cartaoIdentificado = cartoes[0]?.nome || 'CREDITO';
       } else if (/débito|debito/i.test(txtLower)) {
@@ -950,6 +950,13 @@ export default function App() {
           anoMesItem = `${anoM}-${mesM}`;
           dataVencItem = `${anoM}-${mesM}-15`;
         }
+        
+        // NOVA LÓGICA: Se for parcelado e NÃO for crédito, só a 1ª parcela fica paga.
+        const isCredito = dados.metodo === 'CREDITO';
+        let statusPago = dados.pago !== undefined ? dados.pago : true;
+        if (pTotal > 1 && !isCredito) {
+          statusPago = (i === 0); 
+        }
 
         await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
           descricao: pTotal > 1 ? `${dados.descricao} (${i + 1}/${pTotal})` : dados.descricao,
@@ -964,7 +971,7 @@ export default function App() {
           parcelas_total: pTotal,
           grupo_id: pTotal > 1 ? grupoId : null,
           fatura_paga: false,
-          pago: dados.pago !== undefined ? dados.pago : true,
+          pago: statusPago,
           data_vencimento: dataVencItem,
           anoMes: anoMesItem,
           mensagem_original: textoOriginal,
@@ -974,12 +981,12 @@ export default function App() {
 
       if (dados.pago === false) {
         resumoRespostas.push(
-          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} > ${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
+          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} >${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
         );
       } else {
         const origem = dados.metodo === 'CREDITO' ? `Cartão ${dados.cartao_nome}` : `${dados.metodo} (${dados.banco_nome || 'Geral'})`;
         resumoRespostas.push(
-          `✅ *${dados.descricao}* [${catFinal} > ${subFinal}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} • ${origem}`
+          `✅ *${dados.descricao}* [${catFinal} > ${subFinal}]: R$ ${dados.valorParcela.toFixed(2)}${pTotal > 1 ? `(${pTotal}x)` : ''} • ${origem}`
         );
       }
     }
@@ -1056,24 +1063,20 @@ export default function App() {
           let bancoResp = null;
 
           for (const c of cartoes) {
-            if (txtLower.includes(c.nome.toLowerCase())) {
-              metodoResp = 'CREDITO';
-              cartaoResp = c.nome;
-              break;
-            }
+            const nCartao = c.nome.toLowerCase();
+            if (txtLower.includes(nCartao) || nCartao.includes(txtLower)) { metodoResp = 'CREDITO'; cartaoResp = c.nome; break; }
           }
           for (const b of bancos) {
-            if (txtLower.includes(b.nome.toLowerCase())) {
+            const nBanco = b.nome.toLowerCase();
+            if (txtLower.includes(nBanco) || nBanco.includes(txtLower)) {
               bancoResp = b.nome;
               if (!metodoResp) metodoResp = /débito|debito/i.test(txtLower) ? 'DEBITO' : 'PIX';
               break;
             }
           }
           if (!metodoResp) {
-            if (/crédito|credito|cartão|cartao/i.test(txtLower)) {
-              metodoResp = 'CREDITO';
-              cartaoResp = cartoes[0]?.nome || 'CREDITO';
-            } else if (/débito|debito/i.test(txtLower)) metodoResp = 'DEBITO';
+            if (/crédito|credito|cartão|cartao/i.test(txtLower)) { metodoResp = 'CREDITO'; cartaoResp = cartoes[0]?.nome || 'CREDITO'; }
+            else if (/débito|debito/i.test(txtLower)) metodoResp = 'DEBITO';
             else if (/pix/i.test(txtLower)) metodoResp = 'PIX';
             else if (/dinheiro/i.test(txtLower)) metodoResp = 'DINHEIRO';
           }
@@ -1091,7 +1094,10 @@ export default function App() {
             return;
           }
         } else if (pendenteSimulador.etapa === 'BANCO') {
-          const bEnc = bancos.find(b => txtLower.includes(b.nome.toLowerCase())) || bancos[0];
+          const bEnc = bancos.find(b => {
+            const nBanco = b.nome.toLowerCase();
+            return txtLower.includes(nBanco) || nBanco.includes(txtLower);
+          }) || bancos[0];
           if (bEnc) {
             atualizados = atualizados.map(it => ({ ...it, banco_nome: bEnc.nome }));
             await verificarPendenciasSimulador(atualizados, pendenteSimulador.textoOriginal);
@@ -1141,7 +1147,7 @@ export default function App() {
         if (prox.length === 0) {
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '⏳ *Contas Próximas (Até 5 dias)*\n\n🎉 Nenhuma conta em aberto vencendo nos próximos 5 dias!' }]);
         } else {
-          const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence: ${formatarDataBR(t.data_vencimento)})`).join('\n');
+          const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence:${formatarDataBR(t.data_vencimento)})`).join('\n');
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `⏳ *Contas Próximas do Vencimento (5 dias)*\n\n${linhas}` }]);
         }
         setProcessando(false);
@@ -1541,6 +1547,7 @@ export default function App() {
               </button>
             </div>
             
+            {/* CHECKBOX: APLICAR EM PARCELAS FUTURAS */}
             {transacaoEditando.grupo_id && (
               <div className="flex items-center gap-3 mt-2 p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl">
                 <input 

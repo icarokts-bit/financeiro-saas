@@ -58,6 +58,7 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   return msgEnviada;
 }
 
+// Rotas da API (Com a segurança aplicada corretamente e sem erros de sintaxe)
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
   res.status(200).send('OK');
@@ -578,6 +579,12 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         dataVencItem = `${anoM}-${mesM}-15`;
       }
 
+      const isCredito = item.metodo === 'CREDITO';
+      let statusPago = item.pago !== undefined ? item.pago : true;
+      if (parcelasTotal > 1 && !isCredito) {
+        statusPago = (i === 0); 
+      }
+
       const novoDoc = {
         descricao: parcelasTotal > 1 ? `${item.descricao} (${i + 1}/${parcelasTotal})` : item.descricao,
         valor: valorParcela,
@@ -591,7 +598,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         parcelas_total: parcelasTotal,
         grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
-        pago: item.pago !== undefined ? item.pago : true,
+        pago: statusPago,
         data_vencimento: dataVencItem,
         anoMes: anoMesItem,
         origem: 'WHATSAPP_IA',
@@ -770,7 +777,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     const orcamentos = userData.orcamentos || {};
     const pendente = userData.pendente_pagamento || null;
 
-    const txtLimpo = semAcento(textoUsuario).trim();
+    const txtLimpo = semAcento(textoUsuario).trim().toLowerCase();
     const hoje = new Date();
     const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
     const hojeStr = hoje.toISOString().split('T')[0];
@@ -792,7 +799,11 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
 
       if (pendente.etapa === 'BAIXA_CONTA_BANCO' || pendente.etapa === 'PAGAR_FATURA_BANCO') {
-        const bancoEscolhido = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos[0];
+        const bancoEscolhido = bancos.find(b => {
+          const nBanco = semAcento(b.nome).toLowerCase();
+          return txtLimpo.includes(nBanco) || nBanco.includes(txtLimpo);
+        }) || bancos[0];
+        
         if (bancoEscolhido) {
           if (pendente.etapa === 'PAGAR_FATURA_BANCO') {
             const { cartaoNome, valorFatura } = pendente;
@@ -852,10 +863,12 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           let bancoResp = null;
 
           for (const c of cartoes) {
-            if (txtLimpo.includes(semAcento(c.nome))) { metodoResp = 'CREDITO'; cartaoResp = c.nome; break; }
+            const nCartao = semAcento(c.nome).toLowerCase();
+            if (txtLimpo.includes(nCartao) || nCartao.includes(txtLimpo)) { metodoResp = 'CREDITO'; cartaoResp = c.nome; break; }
           }
           for (const b of bancos) {
-            if (txtLimpo.includes(semAcento(b.nome))) {
+            const nBanco = semAcento(b.nome).toLowerCase();
+            if (txtLimpo.includes(nBanco) || nBanco.includes(txtLimpo)) {
               bancoResp = b.nome;
               if (!metodoResp) metodoResp = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
               break;
@@ -880,9 +893,13 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             return;
           }
         } else if (pendente.etapa === 'BANCO') {
-          const bancoObj = bancos.find(b => txtLimpo.includes(semAcento(b.nome))) || bancos[0];
-          if (bancoObj) {
-            itensAtualizados = itensAtualizados.map(it => ({ ...it, banco_nome: bancoObj.nome }));
+          const bEnc = bancos.find(b => {
+            const nBanco = semAcento(b.nome).toLowerCase();
+            return txtLimpo.includes(nBanco) || nBanco.includes(txtLimpo);
+          }) || bancos[0];
+          
+          if (bEnc) {
+            itensAtualizados = itensAtualizados.map(it => ({ ...it, banco_nome: bEnc.nome }));
             await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
             return;
           }
@@ -926,7 +943,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         }
 
         if (!bancoOrigem || !bancoDestino) {
-          const encontrados = bancos.filter(b => txtLimpo.includes(semAcento(b.nome)));
+          const encontrados = bancos.filter(b => txtLimpo.includes(semAcento(b.nome).toLowerCase()));
           if (encontrados.length >= 2) { bancoOrigem = encontrados[0].nome; bancoDestino = encontrados[1].nome; }
         }
 
@@ -972,10 +989,10 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     if (isComandoBaixa) {
       const snapMes = await db.collection('users').doc(userId).collection('transacoes').where('anoMes', '==', anoMesAtual).get();
       const transMes = snapMes.docs.map(d => ({ id: d.id, ...d.data() }));
-      const bancoInformado = bancos.find(b => txtLimpo.includes(semAcento(b.nome)));
+      const bancoInformado = bancos.find(b => txtLimpo.includes(semAcento(b.nome).toLowerCase()));
 
       if (/fatura/i.test(txtLimpo)) {
-        const cartaoAlvo = cartoes.find(c => txtLimpo.includes(semAcento(c.nome))) || cartoes[0];
+        const cartaoAlvo = cartoes.find(c => txtLimpo.includes(semAcento(c.nome).toLowerCase())) || cartoes[0];
         if (cartaoAlvo) {
           const itensFatura = transMes.filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoAlvo.nome) && !t.fatura_paga);
           const totalFatura = itensFatura.reduce((a, b) => a + Number(b.valor || 0), 0);
@@ -992,7 +1009,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       }
 
       const contasAbertas = transMes.filter(t => t.pago === false);
-      const contaEncontrada = contasAbertas.find(t => txtLimpo.includes(semAcento(t.descricao)));
+      const contaEncontrada = contasAbertas.find(t => txtLimpo.includes(semAcento(t.descricao).toLowerCase()));
       if (contaEncontrada) {
         const metodoBaixa = /debito/i.test(txtLimpo) ? 'DEBITO' : 'PIX';
         if (!bancoInformado) {
@@ -1052,7 +1069,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     let itensExtraidos = [];
 
     for (const parte of partes) {
-      const pLimpo = semAcento(parte);
+      const pLimpo = semAcento(parte).toLowerCase();
       const infoVenc = extrairDataVencimento(parte);
       const isAgendado = Boolean(infoVenc) || /\b(vence|vencimento|a pagar|a receber)\b/i.test(pLimpo);
       const parteSemData = infoVenc ? parte.replace(infoVenc.trechoRemovido, ' ') : parte;
@@ -1067,8 +1084,21 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       let cartaoNome = null;
       let bancoNome = null;
 
-      for (const c of cartoes) { if (pLimpo.includes(semAcento(c.nome))) { metodo = 'CREDITO'; cartaoNome = c.nome; break; } }
-      for (const b of bancos) { if (pLimpo.includes(semAcento(b.nome))) { bancoNome = b.nome; if (!metodo) metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX'; break; } }
+      for (const c of cartoes) { 
+        const nCartao = semAcento(c.nome).toLowerCase();
+        if (pLimpo.includes(nCartao) || nCartao.includes(pLimpo)) { metodo = 'CREDITO'; cartaoNome = c.nome; break; } 
+      }
+      for (const b of bancos) { 
+        const nBanco = semAcento(b.nome).toLowerCase();
+        if (pLimpo.includes(nBanco) || nBanco.includes(pLimpo)) { bancoNome = b.nome; if (!metodo) metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX'; break; } 
+      }
+
+      if (!metodo) {
+        if (/credito|cartao/i.test(pLimpo)) { metodo = 'CREDITO'; cartaoNome = cartoes[0]?.nome || 'CREDITO'; }
+        else if (/debito/i.test(pLimpo)) metodo = 'DEBITO';
+        else if (/pix/i.test(pLimpo)) metodo = 'PIX';
+        else if (/dinheiro/i.test(pLimpo)) metodo = 'DINHEIRO';
+      }
 
       let descricao = parteSemData.replace(/\b(comprei|gastei|paguei|no pix|no debito|pix|debito|reais|r\$|de|do|da|no|na|em)\b/gi, ' ').replace(matchValor[0], '').trim();
       descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
