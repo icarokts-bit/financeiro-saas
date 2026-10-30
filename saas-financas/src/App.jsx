@@ -37,12 +37,6 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   const pLimpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   if (isReceita) return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
 
-  // PRIORIDADE 1: Compras Online e E-commerce (Impede conflito com a palavra "mercado")
-  if (/mercado livre|shopee|amazon|shein|aliexpress|magalu|magazine|americanas/i.test(pLimpo)) {
-    return { categoria: 'Outros', subcategoria: 'Compras Online', reconhecida: true };
-  }
-
-  // PRIORIDADE 2: Mercado e Alimentação
   if (/mercado|supermercado|atacadao|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|ovo|leite|pao|queijo|sabao|detergente/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
@@ -596,7 +590,6 @@ export default function App() {
       const anoM = dParc.getFullYear();
       const mesM = String(dParc.getMonth() + 1).padStart(2, '0');
 
-      // NOVA LÓGICA: Se for parcelado e NÃO for crédito, só a 1ª parcela fica paga.
       let statusPago = true;
       if (parcelasTotal > 1 && !isCredito) {
         statusPago = (i === 0); 
@@ -915,7 +908,7 @@ export default function App() {
     const classif = classificarCategoriaLocal(trecho, isReceita, categorias, subcategorias);
 
     let descricao = textoSemParcela
-      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|dia|no cartão de credito|no cartão|no credito|no pix|no débito|no debito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |em /gi, ' ')
+      .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|dia|no cartão de credito|no cartão|no credito|no pix|no débito|no debito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |em |cart[ãa]o\s+[a-z]+/gi, ' ')
       .replace(matchValor[0], '')
       .replace(cartaoIdentificado ? new RegExp(cartaoIdentificado, 'gi') : '', '')
       .replace(bancoIdentificado ? new RegExp(bancoIdentificado, 'gi') : '', '')
@@ -937,7 +930,7 @@ export default function App() {
       categoria: classif.categoria,
       subcategoria: classif.subcategoria,
       precisaPerguntarCategoria: !classif.reconhecida,
-      precisaPerguntarData: (parcelasTotal > 1 || isAgendado) && !infoVenc,
+      precisaPerguntarData: (parcelasTotal > 1 || isAgendado) && !infoVenc && metodo !== 'CREDITO',
       pago: !isAgendado,
       data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeIso,
       anoMes: infoVenc ? infoVenc.anoMes : filtroMesAno
@@ -1230,23 +1223,6 @@ export default function App() {
     } finally {
       setProcessando(false);
     }
-  };
-
-  // Função para exportar CSV (Botão adicionado à Aba de Movimentação)
-  const exportarParaExcel = () => {
-    if (listaMovimentacaoExtrato.length === 0) return alert('Não há dados para exportar.');
-    const cabecalho = 'Data,Descrição,Categoria,Subcategoria,Valor,Tipo,Método/Origem,Status\n';
-    const linhas = listaMovimentacaoExtrato.map(t => {
-      const origem = t.isLinhaFatura ? 'FATURA MENSAL' : t.cartao_nome ? `Cartão ${t.cartao_nome}` : t.banco_nome || t.metodo || '';
-      return `${formatarDataBR(t.data_vencimento)},"${t.descricao}","${t.categoria}","${t.subcategoria || ''}",${t.valor},${t.tipo},"${origem}",${t.pago ? 'Pago' : 'Aberto'}`;
-    }).join('\n');
-    const blob = new Blob([cabecalho + linhas], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Extrato_FinZap_${filtroMesAno}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   if (carregandoAuth) {
