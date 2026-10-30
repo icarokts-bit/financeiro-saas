@@ -37,6 +37,12 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   const pLimpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   if (isReceita) return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
 
+  // PRIORIDADE 1: Compras Online e E-commerce (Impede conflito com "mercado")
+  if (/mercado livre|shopee|amazon|shein|aliexpress|magalu|magazine|americanas/i.test(pLimpo)) {
+    return { categoria: 'Outros', subcategoria: 'Compras Online', reconhecida: true };
+  }
+
+  // PRIORIDADE 2: Mercado e Alimentação
   if (/mercado|supermercado|atacadao|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|ovo|leite|pao|queijo|sabao|detergente/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
@@ -71,6 +77,24 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   return { categoria: null, subcategoria: null, reconhecida: false };
 };
 
+const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
+  const dataCompra = new Date(dataCompraIso + 'T12:00:00');
+  let anoFatura = dataCompra.getFullYear();
+  let mesFatura = dataCompra.getMonth(); 
+  const diaCompra = dataCompra.getDate();
+
+  if (diaCompra >= diaFechamento) mesFatura += 1;
+  if (diaVencimento < diaFechamento) mesFatura += 1;
+  mesFatura += (parcelaAtual - 1);
+
+  const dataVenc = new Date(anoFatura, mesFatura, diaVencimento);
+  const anoRes = dataVenc.getFullYear();
+  const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
+  const diaRes = String(diaVencimento).padStart(2, '0');
+
+  return { anoMes: `${anoRes}-${mesRes}`, dataVencimento: `${anoRes}-${mesRes}-${diaRes}` };
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [carregandoAuth, setCarregandoAuth] = useState(true);
@@ -80,22 +104,23 @@ export default function App() {
   const [senhaInput, setSenhaInput] = useState('');
   const [erroAuth, setErroAuth] = useState('');
 
+  const [statusAssinatura, setStatusAssinatura] = useState('VERIFICANDO');
+  const [linkPagamentoAsaas, setLinkPagamentoAsaas] = useState(null);
+  const [gerandoPix, setGerandoPix] = useState(false);
+
   const [abaAtiva, setAbaAtiva] = useState('dashboard');
   const [transacoes, setTransacoes] = useState([]);
 
-  // Cartões de Crédito
   const [cartoes, setCartoes] = useState([
     { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12, banco: 'Itaú' },
     { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17, banco: 'Nubank Conta' }
   ]);
 
-  // Bancos e Contas (Saldos Individuais)
   const [bancos, setBancos] = useState([
     { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 1500 },
     { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
   ]);
   
-  // Categorias e Subcategorias
   const [categorias, setCategorias] = useState(['Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
   const [subcategorias, setSubcategorias] = useState({
     'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Padaria'],
@@ -121,7 +146,6 @@ export default function App() {
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
   const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
 
-  // Estados de Formulários
   const [novaCatNome, setNovaCatNome] = useState('');
   const [catSelecionadaParaSub, setCatSelecionadaParaSub] = useState('Alimentação');
   const [novaSubNome, setNovaSubNome] = useState('');
@@ -151,20 +175,16 @@ export default function App() {
     banco_nome: 'Itaú',
     pago: false
   });
+
   const [filtroVencNome, setFiltroVencNome] = useState('');
   const [filtroVencCat, setFiltroVencCat] = useState('TODAS');
   const [filtroVencStatus, setFiltroVencStatus] = useState('ABERTO');
   const [filtroVencData, setFiltroVencData] = useState('TODOS');
 
   const [modalBaixaConta, setModalBaixaConta] = useState(null);
-
   const [pesquisaExtrato, setPesquisaExtrato] = useState('');
   const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
-
-  // Controle do Gráfico Drill-down
   const [categoriaSelecionadaGrafico, setCategoriaSelecionadaGrafico] = useState(null);
-
-  // Estados para Lançamento Flexível
   const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
   const [novaCompraCartao, setNovaCompraCartao] = useState({
     descricao: '',
@@ -180,17 +200,15 @@ export default function App() {
   const [modalPagarFatura, setModalPagarFatura] = useState(null);
   const [transacaoEditando, setTransacaoEditando] = useState(null);
   const [aplicarFuturasEdicao, setAplicarFuturasEdicao] = useState(false);
-  
   const [transacaoExcluindo, setTransacaoExcluindo] = useState(null);
   const [aplicarFuturasExclusao, setAplicarFuturasExclusao] = useState(false);
 
-  // Simulador de WhatsApp
   const [msgWhats, setMsgWhats] = useState('');
   const [pendenteSimulador, setPendenteSimulador] = useState(null);
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ "comprei maçã 5,00 no débito" -> Reconhece Alimentação > Mercado e pergunta de qual banco saiu!\n2️⃣ "comprei lanche 35,00" -> Vai para Alimentação > Lazer.\n3️⃣ "transferir 200 do Itaú para Nubank"\n4️⃣ "paguei a água" -> Dá baixa pelo WhatsApp.\n5️⃣ Envie "teste" para checar a conexão.' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ O sistema avança o mês no Cartão de Crédito inteligente.\n2️⃣ Mercado Livre vai para Compras Online automaticamente.\n3️⃣ "Exportar Excel" a funcionar 100%!\n\nEnvie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -213,6 +231,7 @@ export default function App() {
         const userSnap = await getDoc(userDocRef);
         if (userSnap.exists()) {
           const dados = userSnap.data();
+          setStatusAssinatura(dados.status_assinatura || 'INATIVO');
           if (dados.categorias) setCategorias(dados.categorias);
           if (dados.subcategorias) setSubcategorias(dados.subcategorias);
           if (dados.orcamentos) setOrcamentos(dados.orcamentos);
@@ -222,6 +241,7 @@ export default function App() {
           if (dados.whatsapp_status) setWhatsappStatus(dados.whatsapp_status);
           if (dados.whatsapp_qrcode) setWhatsappQrCode(dados.whatsapp_qrcode);
         } else {
+          setStatusAssinatura('INATIVO');
           await setDoc(userDocRef, { 
             categorias, 
             subcategorias,
@@ -229,7 +249,8 @@ export default function App() {
             cartoes, 
             bancos,
             contasFixas,
-            whatsapp_status: 'DISCONNECTED' 
+            whatsapp_status: 'DISCONNECTED',
+            status_assinatura: 'INATIVO'
           }, { merge: true });
         }
       }
@@ -248,6 +269,7 @@ export default function App() {
     const unsubUser = onSnapshot(userDocRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
+        setStatusAssinatura(data.status_assinatura || 'INATIVO');
         if (data.whatsapp_status) setWhatsappStatus(data.whatsapp_status);
         if (data.whatsapp_qrcode !== undefined) setWhatsappQrCode(data.whatsapp_qrcode);
         if (data.cartoes) setCartoes(data.cartoes);
@@ -257,10 +279,7 @@ export default function App() {
       }
     });
 
-    const q = query(
-      collection(db, 'users', user.uid, 'transacoes'),
-      orderBy('criadoEm', 'desc')
-    );
+    const q = query(collection(db, 'users', user.uid, 'transacoes'), orderBy('criadoEm', 'desc'));
 
     const unsubTrans = onSnapshot(q, (snapshot) => {
       const lista = snapshot.docs.map(docSnap => {
@@ -314,10 +333,7 @@ export default function App() {
     try {
       await fetch(`${RENDER_API_URL}/conectar`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-api-key': API_SECRET_KEY 
-        },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
         body: JSON.stringify({ userId: user.uid })
       });
     } catch (e) {
@@ -332,10 +348,7 @@ export default function App() {
     try {
       await fetch(`${RENDER_API_URL}/desconectar`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-api-key': API_SECRET_KEY 
-        },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
         body: JSON.stringify({ userId: user.uid })
       });
       setWhatsappStatus('DISCONNECTED');
@@ -349,9 +362,7 @@ export default function App() {
     try {
       await fetch(`${RENDER_API_URL}/verificar-alertas`, {
         method: 'GET',
-        headers: {
-          'x-api-key': API_SECRET_KEY
-        }
+        headers: { 'x-api-key': API_SECRET_KEY }
       });
       alert('🔔 O comando de verificação de alertas foi acionado!');
     } catch (e) {
@@ -528,7 +539,6 @@ export default function App() {
     });
     setModalBaixaConta(null);
   };
-
   const adicionarContaFixa = async (e) => {
     e.preventDefault();
     if (!fixaNome || !fixaValor || !user) return;
@@ -573,7 +583,6 @@ export default function App() {
     });
   };
 
-  // Lógica Flexível de Lançamento (Cartão, PIX, Dinheiro, Carnê)
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
     if (!novaCompraCartao.descricao || !novaCompraCartao.valorTotal || !user) return;
@@ -584,15 +593,25 @@ export default function App() {
     const [anoBase, mesBase] = filtroMesAno.split('-').map(Number);
     const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const isCredito = novaCompraCartao.metodo === 'CREDITO';
+    
+    const cartaoObj = isCredito ? cartoes.find(c => c.nome === novaCompraCartao.cartaoNome) : null;
+    const diaFech = cartaoObj ? (cartaoObj.diaFechamento || 5) : 5;
+    const diaVenc = cartaoObj ? (cartaoObj.diaVencimento || 12) : 12;
 
     for (let i = 0; i < parcelasTotal; i++) {
-      const dParc = new Date(anoBase, (mesBase - 1) + i, 15);
-      const anoM = dParc.getFullYear();
-      const mesM = String(dParc.getMonth() + 1).padStart(2, '0');
-
+      let anoMesItem = filtroMesAno;
+      let dataVencItem = hojeIso;
       let statusPago = true;
-      if (parcelasTotal > 1 && !isCredito) {
-        statusPago = (i === 0); 
+
+      if (isCredito) {
+         const fatura = calcularDataFaturaCartao(hojeIso, diaFech, diaVenc, i + 1);
+         anoMesItem = fatura.anoMes;
+         dataVencItem = fatura.dataVencimento;
+      } else if (parcelasTotal > 1) {
+        const dParc = new Date(anoBase, (mesBase - 1) + i, 15);
+        anoMesItem = `${dParc.getFullYear()}-${String(dParc.getMonth() + 1).padStart(2, '0')}`;
+        dataVencItem = `${anoMesItem}-15`;
+        statusPago = (i === 0);
       }
 
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
@@ -609,8 +628,8 @@ export default function App() {
         grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
         pago: isCredito ? true : statusPago, 
-        data_vencimento: `${anoM}-${mesM}-15`,
-        anoMes: `${anoM}-${mesM}`,
+        data_vencimento: dataVencItem,
+        anoMes: anoMesItem,
         mensagem_original: `Lançamento manual parcelado`,
         criadoEm: serverTimestamp()
       });
@@ -938,7 +957,6 @@ export default function App() {
   };
 
   const gravarItensSimulador = async (itens, textoOriginal) => {
-    const hoje = new Date();
     let resumoRespostas = [];
 
     for (const dados of itens) {
@@ -947,31 +965,35 @@ export default function App() {
       const subFinal = dados.subcategoria || 'Geral';
       const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+      const isCredito = dados.metodo === 'CREDITO';
+      const cartaoObj = isCredito ? cartoes.find(c => c.nome === dados.cartao_nome) : null;
+      const diaFech = cartaoObj ? (cartaoObj.diaFechamento || 5) : 5;
+      const diaVenc = cartaoObj ? (cartaoObj.diaVencimento || 12) : 12;
+
       const dataReferencia = new Date((dados.data_vencimento || hojeIso) + 'T12:00:00');
-      let diaVenc = dataReferencia.getDate();
-      let mesVenc = dataReferencia.getMonth();
-      let anoVenc = dataReferencia.getFullYear();
+      let diaVencPix = dataReferencia.getDate();
+      let mesVencPix = dataReferencia.getMonth();
+      let anoVencPix = dataReferencia.getFullYear();
 
       const dataHojeLocal = new Date();
-      if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && dados.metodo !== 'CREDITO') {
-        mesVenc += 1;
+      if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && !isCredito) {
+        mesVencPix += 1;
       }
 
       for (let i = 0; i < pTotal; i++) {
         let anoMesItem = dados.anoMes || filtroMesAno;
         let dataVencItem = dados.data_vencimento || hojeIso;
 
-        if (pTotal > 1) {
-          const dataParcela = new Date(anoVenc, mesVenc + i, diaVenc);
-          const anoM = dataParcela.getFullYear();
-          const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
-          const diaM = String(dataParcela.getDate()).padStart(2, '0');
-          
-          anoMesItem = `${anoM}-${mesM}`;
-          dataVencItem = `${anoM}-${mesM}-${diaM}`;
+        if (isCredito) {
+           const fatura = calcularDataFaturaCartao(dados.data_vencimento || hojeIso, diaFech, diaVenc, i + 1);
+           anoMesItem = fatura.anoMes;
+           dataVencItem = fatura.dataVencimento;
+        } else if (pTotal > 1) {
+          const dataParcela = new Date(anoVencPix, mesVencPix + i, diaVencPix);
+          anoMesItem = `${dataParcela.getFullYear()}-${String(dataParcela.getMonth() + 1).padStart(2, '0')}`;
+          dataVencItem = `${anoMesItem}-${String(dataParcela.getDate()).padStart(2, '0')}`;
         }
         
-        const isCredito = dados.metodo === 'CREDITO';
         let statusPago = dados.pago !== undefined ? dados.pago : true;
         if (pTotal > 1 && !isCredito) {
           statusPago = false; 
@@ -998,12 +1020,12 @@ export default function App() {
         });
       }
 
-      if (dados.pago === false || (pTotal > 1 && dados.metodo !== 'CREDITO')) {
+      if (dados.pago === false || (pTotal > 1 && !isCredito)) {
         resumoRespostas.push(
-          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} > ${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Primeiro Vencimento: *${diaVenc}/${String(mesVenc + 1).padStart(2, '0')}/${anoVenc}*`
+          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} > ${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Primeiro Vencimento: *${diaVencPix}/${String(mesVencPix + 1).padStart(2, '0')}/${anoVencPix}*`
         );
       } else {
-        const origem = dados.metodo === 'CREDITO' ? `Cartão ${dados.cartao_nome}` : `${dados.metodo} (${dados.banco_nome || 'Geral'})`;
+        const origem = isCredito ? `Cartão ${dados.cartao_nome}` : `${dados.metodo} (${dados.banco_nome || 'Geral'})`;
         resumoRespostas.push(
           `✅ *${dados.descricao}* [${catFinal} > ${subFinal}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} • ${origem}`
         );
@@ -1224,7 +1246,8 @@ export default function App() {
       setProcessando(false);
     }
   };
-const exportarParaExcel = () => {
+
+  const exportarParaExcel = () => {
     if (listaMovimentacaoExtrato.length === 0) return alert('Não há dados para exportar.');
     const cabecalho = 'Data,Descrição,Categoria,Subcategoria,Valor,Tipo,Método/Origem,Status\n';
     const linhas = listaMovimentacaoExtrato.map(t => {
@@ -1239,6 +1262,20 @@ const exportarParaExcel = () => {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const assinarPlanoPro = async () => {
+    setGerandoPix(true);
+    try {
+      const res = await fetch(`${RENDER_API_URL}/asaas/gerar-cobranca`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
+        body: JSON.stringify({ userId: user.uid, email: user.email, valor: 49.90 })
+      });
+      const data = await res.json();
+      if (data.invoiceUrl) setLinkPagamentoAsaas(data.invoiceUrl);
+    } catch (e) { alert('Erro ao conectar com o sistema de pagamentos.'); } finally { setGerandoPix(false); }
+  };
+
   if (carregandoAuth) {
     return (
       <div className="min-h-screen bg-slate-950 text-emerald-400 flex items-center justify-center font-medium">
@@ -1290,6 +1327,36 @@ const exportarParaExcel = () => {
           <button onClick={() => setIsLoginMode(!isLoginMode)} className="mt-6 text-xs text-emerald-400 hover:text-emerald-300 w-full text-center block transition font-medium">
             {isLoginMode ? 'Não tem uma conta? Cadastre-se' : 'Já tem uma conta? Faça login'}
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (statusAssinatura === 'VERIFICANDO') {
+    return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-emerald-400 font-medium">Verificando licença...</div>;
+  }
+
+  if (statusAssinatura === 'INATIVO' || statusAssinatura === 'EXPIRADO') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+        <div className="bg-slate-900/80 backdrop-blur-xl border border-slate-800 p-8 rounded-3xl w-full max-w-lg shadow-2xl text-center">
+          <div className="w-16 h-16 bg-emerald-500/10 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto mb-6"><Sparkles className="w-8 h-8" /></div>
+          <h2 className="text-2xl font-bold mb-2">Desbloqueie o FinZap Pro</h2>
+          <p className="text-sm text-slate-400 mb-8">Sua conta está inativa. Assine agora para ter acesso ao robô do WhatsApp, painel completo e IA.</p>
+          <div className="bg-slate-950 border border-emerald-500/30 rounded-2xl p-6 mb-8 text-left space-y-4">
+            <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Lançamentos no WhatsApp IA</div>
+            <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Alertas automáticos de Vencimento</div>
+            <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Gestão ilimitada de Cartões e Bancos</div>
+            <div className="mt-4 pt-4 border-t border-slate-800 text-center"><strong className="text-2xl text-emerald-400">R$ 49,90</strong><span className="text-xs text-slate-500"> /mês</span></div>
+          </div>
+          {linkPagamentoAsaas ? (
+            <div className="space-y-4">
+              <p className="text-sm font-semibold text-amber-400">Fatura gerada!</p>
+              <a href={linkPagamentoAsaas} target="_blank" rel="noreferrer" className="block w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl transition">Pagar com PIX Agora</a>
+              <p className="text-xs text-slate-500 mt-2">Acesso liberado automaticamente após o pagamento.</p>
+            </div>
+          ) : <button onClick={assinarPlanoPro} disabled={gerandoPix} className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition">{gerandoPix ? <RefreshCw className="w-5 h-5 animate-spin" /> : 'Assinar com PIX'}</button>}
+          <button onClick={handleLogout} className="mt-6 text-xs text-rose-400 hover:underline">Sair da conta</button>
         </div>
       </div>
     );
@@ -1401,7 +1468,7 @@ const exportarParaExcel = () => {
   const hojeZeroData = new Date(hojeIso + 'T00:00:00');
   const limite5Dias = new Date(hojeZeroData.getTime() + 5 * 24 * 60 * 60 * 1000);
 
-  const listaContasVencerReceber = transacoesFiltradas
+  const listaContasVencerReceber = [...transacoesFiltradas, ...faturasConsolidadasNoExtrato]
     .filter(t => {
       if (t.metodo === 'CREDITO' || t.metodo === 'TRANSFERENCIA') return false;
       if (filtroVencNome && !t.descricao?.toLowerCase().includes(filtroVencNome.toLowerCase())) return false;
@@ -1800,9 +1867,9 @@ const exportarParaExcel = () => {
               <span className="flex items-center gap-3">
                 <Clock className="w-4 h-4" /> A Vencer & Receber
               </span>
-              {transacoesFiltradas.some(t => t.pago === false) && (
+              {listaContasVencerReceber.filter(t => t.pago === false).length > 0 && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold">
-                  {transacoesFiltradas.filter(t => t.pago === false).length}
+                  {listaContasVencerReceber.filter(t => t.pago === false).length}
                 </span>
               )}
             </button>
@@ -2017,7 +2084,10 @@ const exportarParaExcel = () => {
                   <div className="bg-slate-950/70 border border-slate-800/80 p-4 rounded-xl">
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas a Vencer ({filtroMesAno})</span>
                     <p className="text-lg font-bold text-amber-400 mt-1">
-                      R$ {transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0).toFixed(2)}
+                      R$ {(
+                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA' && t.metodo !== 'CREDITO').reduce((a, b) => a + Number(b.valor || 0), 0) +
+                        faturasConsolidadasNoExtrato.reduce((a, b) => a + Number(b.valor || 0), 0)
+                      ).toFixed(2)}
                     </p>
                     <button onClick={() => setAbaAtiva('vencimentos')} className="text-[11px] text-emerald-400 hover:underline mt-1.5 block">
                       Gerenciar vencimentos →
@@ -2365,17 +2435,17 @@ const exportarParaExcel = () => {
                   <p className="text-sm text-slate-500 py-8 text-center">Nenhuma conta encontrada para os filtros selecionados.</p>
                 ) : (
                   listaContasVencerReceber.map(t => (
-                    <div key={t.id} className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${t.pago ? 'bg-emerald-950/10 border-emerald-500/20' : 'bg-slate-950/80 border-amber-500/30'}`}>
+                    <div key={t.id} className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${t.pago ? 'bg-emerald-950/10 border-emerald-500/20' : t.isLinhaFatura ? 'bg-sky-950/15 border-sky-500/30' : 'bg-slate-950/80 border-amber-500/30'}`}>
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${t.tipo === 'RECEITA' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
-                            {t.tipo === 'RECEITA' ? 'A RECEBER' : 'A PAGAR'}
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${t.tipo === 'RECEITA' ? 'bg-emerald-500/20 text-emerald-300' : t.isLinhaFatura ? 'bg-sky-500/20 text-sky-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                            {t.tipo === 'RECEITA' ? 'A RECEBER' : t.isLinhaFatura ? '💳 FATURA CARTÃO' : 'A PAGAR'}
                           </span>
                           <p className="font-semibold text-sm text-slate-100">{t.descricao}</p>
                           <span className="text-xs text-emerald-400">({t.categoria} &gt; {t.subcategoria || 'Geral'})</span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1">
-                          Vencimento: <strong className="text-amber-300">{formatarDataBR(t.data_vencimento)}</strong> • Status: <strong>{t.pago ? `Pago (${t.banco_nome || t.metodo})` : 'Em Aberto'}</strong>
+                          Vencimento: <strong className={t.isLinhaFatura ? 'text-sky-400' : 'text-amber-300'}>{formatarDataBR(t.data_vencimento)}</strong> • Status: <strong>{t.pago ? `Pago (${t.banco_nome || t.metodo})` : 'Em Aberto'}</strong>
                         </p>
                       </div>
 
@@ -2384,21 +2454,27 @@ const exportarParaExcel = () => {
                           R$ {Number(t.valor || 0).toFixed(2)}
                         </span>
                         <button
-                          onClick={() => clicarDarBaixaConta(t)}
+                          onClick={() => {
+                            if (t.isLinhaFatura) {
+                              const cartaoObj = resumoCartoes.find(c => c.nome === t.cartao_nome);
+                              if (cartaoObj) abrirModalPagamentoFatura(cartaoObj);
+                            } else {
+                              clicarDarBaixaConta(t);
+                            }
+                          }}
                           className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition ${
-                            t.pago 
-                              ? 'bg-slate-800 text-emerald-400 hover:bg-slate-700' 
-                              : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                            t.pago ? 'bg-slate-800 text-emerald-400 hover:bg-slate-700' : t.isLinhaFatura ? 'bg-sky-500 hover:bg-sky-400 text-slate-950' : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
                           }`}
                         >
-                          {t.pago ? <><CheckCircle2 className="w-3.5 h-3.5" /> Pago</> : <><Zap className="w-3.5 h-3.5" /> Dar Baixa</>}
+                          {t.pago ? <><CheckCircle2 className="w-3.5 h-3.5" /> Pago</> : t.isLinhaFatura ? <><CreditCard className="w-3.5 h-3.5" /> Pagar Fatura</> : <><Zap className="w-3.5 h-3.5" /> Dar Baixa</>}
                         </button>
-                        <button onClick={() => iniciarEdicaoTransacao(t)} className="text-slate-400 hover:text-sky-400 p-1">
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-                        <button onClick={() => iniciarExclusaoTransacao(t)} className="text-slate-500 hover:text-rose-400 p-1">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        
+                        {!t.isLinhaFatura && (
+                          <button onClick={() => iniciarEdicaoTransacao(t)} className="text-slate-400 hover:text-sky-400 p-1"><Edit3 className="w-4 h-4" /></button>
+                        )}
+                        {!t.isLinhaFatura && (
+                          <button onClick={() => iniciarExclusaoTransacao(t)} className="text-slate-500 hover:text-rose-400 p-1"><Trash2 className="w-4 h-4" /></button>
+                        )}
                       </div>
                     </div>
                   ))
