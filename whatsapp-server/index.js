@@ -567,6 +567,12 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
     return { categoria: 'Receita', subcategoria: 'Vendas / Extras', reconhecida: true };
   }
 
+  // PRIORIDADE 1: Compras Online e E-commerce
+  if (/mercado livre|shopee|amazon|shein|aliexpress|magalu|magazine|americanas/i.test(pLimpo)) {
+    return { categoria: 'Outros', subcategoria: 'Compras Online', reconhecida: true };
+  }
+
+  // PRIORIDADE 2: Alimentação
   if (/mercado|supermercado|atacadao|assai|tenda|compras|feira|acougue|hortifruti|laranja|maca|banana|uva|morango|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|peixe|ovo|leite|pao|queijo|presunto|manteiga|oleo|azeite|acucar|sal|sabao|detergente|papel higienico/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }

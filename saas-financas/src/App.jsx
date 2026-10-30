@@ -37,6 +37,12 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   const pLimpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   if (isReceita) return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
 
+  // PRIORIDADE 1: Compras Online e E-commerce (Impede conflito com a palavra "mercado")
+  if (/mercado livre|shopee|amazon|shein|aliexpress|magalu|magazine|americanas/i.test(pLimpo)) {
+    return { categoria: 'Outros', subcategoria: 'Compras Online', reconhecida: true };
+  }
+
+  // PRIORIDADE 2: Mercado e Alimentação
   if (/mercado|supermercado|atacadao|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|ovo|leite|pao|queijo|sabao|detergente/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
