@@ -1224,7 +1224,21 @@ export default function App() {
       setProcessando(false);
     }
   };
-
+const exportarParaExcel = () => {
+    if (listaMovimentacaoExtrato.length === 0) return alert('Não há dados para exportar.');
+    const cabecalho = 'Data,Descrição,Categoria,Subcategoria,Valor,Tipo,Método/Origem,Status\n';
+    const linhas = listaMovimentacaoExtrato.map(t => {
+      const origem = t.isLinhaFatura ? 'FATURA MENSAL' : t.cartao_nome ? `Cartão ${t.cartao_nome}` : t.banco_nome || t.metodo || '';
+      return `${formatarDataBR(t.data_vencimento)},"${t.descricao}","${t.categoria}","${t.subcategoria || ''}",${t.valor},${t.tipo},"${origem}",${t.pago ? 'Pago' : 'Aberto'}`;
+    }).join('\n');
+    const blob = new Blob([cabecalho + linhas], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Extrato_FinZap_${filtroMesAno}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   if (carregandoAuth) {
     return (
       <div className="min-h-screen bg-slate-950 text-emerald-400 flex items-center justify-center font-medium">
