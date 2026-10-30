@@ -22,9 +22,6 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 const db = admin.firestore();
 const app = express();
 
-app.use(cors());
-app.use(express.json());
-
 // Middleware de Segurança (API Key)
 const validarApiKey = (req, res, next) => {
   const chaveRecebida = req.headers['x-api-key'];
@@ -36,6 +33,9 @@ const validarApiKey = (req, res, next) => {
   next();
 };
 
+app.use(cors());
+app.use(express.json());
+
 const sessions = new Map();
 const userJids = new Map();
 const sentMessagesCache = new Map();
@@ -46,6 +46,25 @@ const formatarDataBR = (isoDate) => {
   if (!isoDate || !isoDate.includes('-')) return isoDate || '';
   const [a, m, d] = isoDate.split('-');
   return `${d}/${m}/${a}`;
+};
+
+// Função matemática avançada para calcular o mês/dia correto da Fatura do Cartão
+const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
+  const dataCompra = new Date(dataCompraIso + 'T12:00:00');
+  let anoFatura = dataCompra.getFullYear();
+  let mesFatura = dataCompra.getMonth(); 
+  const diaCompra = dataCompra.getDate();
+
+  if (diaCompra >= diaFechamento) mesFatura += 1;
+  if (diaVencimento < diaFechamento) mesFatura += 1;
+  mesFatura += (parcelaAtual - 1);
+
+  const dataVenc = new Date(anoFatura, mesFatura, diaVencimento);
+  const anoRes = dataVenc.getFullYear();
+  const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
+  const diaRes = String(diaVencimento).padStart(2, '0');
+
+  return { anoMes: `${anoRes}-${mesRes}`, dataVencimento: `${anoRes}-${mesRes}-${diaRes}` };
 };
 
 async function enviarMensagemSegura(sock, remoteJid, conteudo) {
@@ -65,7 +84,7 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
 // ============================================================================
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
-  res.status(200).send('OK');
+  res.status(200).send('API FinZap Online');
 });
 
 const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://sandbox.asaas.com/api/v3';
@@ -599,7 +618,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
 }
 
 // ============================================================================
-// 6. GRAVAÇÃO NO FIRESTORE COM GRUPO DE PARCELAS
+// 6. GRAVAÇÃO NO FIRESTORE COM GRUPO DE PARCELAS E DATAS AVANÇADAS
 // ============================================================================
 async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
   const hoje = new Date();
@@ -619,14 +638,19 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 
     await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
 
-    // Lógica inteligente de data para garantir 1ª parcela no mês certo
+    // Lógica para dia de fechamento se for cartão
+    const isCredito = item.metodo === 'CREDITO';
+    const cartaoObj = isCredito ? cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome || '')) : null;
+    const diaFech = cartaoObj ? (cartaoObj.diaFechamento || 5) : 5;
+    const diaVencCartao = cartaoObj ? (cartaoObj.diaVencimento || 12) : 12;
+
     const dataReferencia = new Date((item.data_vencimento || hojeStr) + 'T12:00:00');
     let diaVenc = dataReferencia.getDate();
     let mesVenc = dataReferencia.getMonth();
     let anoVenc = dataReferencia.getFullYear();
 
     const dataHojeLocal = new Date();
-    if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && item.metodo !== 'CREDITO') {
+    if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && !isCredito) {
       mesVenc += 1;
     }
 
@@ -634,17 +658,16 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       let anoMesItem = item.anoMes || anoMesPadrao;
       let dataVencItem = item.data_vencimento || hojeStr;
 
-      if (parcelasTotal > 1) {
+      if (isCredito) {
+        const fatura = calcularDataFaturaCartao(item.data_vencimento || hojeStr, diaFech, diaVencCartao, i + 1);
+        anoMesItem = fatura.anoMes;
+        dataVencItem = fatura.dataVencimento;
+      } else if (parcelasTotal > 1) {
         const dataParcela = new Date(anoVenc, mesVenc + i, diaVenc);
-        const anoM = dataParcela.getFullYear();
-        const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
-        const diaM = String(dataParcela.getDate()).padStart(2, '0');
-        
-        anoMesItem = `${anoM}-${mesM}`;
-        dataVencItem = `${anoM}-${mesM}-${diaM}`;
+        anoMesItem = `${dataParcela.getFullYear()}-${String(dataParcela.getMonth() + 1).padStart(2, '0')}`;
+        dataVencItem = `${anoMesItem}-${String(dataParcela.getDate()).padStart(2, '0')}`;
       }
 
-      const isCredito = item.metodo === 'CREDITO';
       let statusPago = item.pago !== undefined ? item.pago : true;
       if (parcelasTotal > 1 && !isCredito) {
         statusPago = false; 
@@ -675,7 +698,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       todasTransacoes.push(novoDoc);
     }
 
-    if (isAgendado || (parcelasTotal > 1 && item.metodo !== 'CREDITO')) {
+    if (isAgendado || (parcelasTotal > 1 && !isCredito)) {
       respostas.push(
         `📅 *Conta Lançada (${item.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n` +
         `• *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
@@ -697,24 +720,23 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       else if (pctCat >= 80) alertasExtras += `\n⚠️ *Atenção:* Categoria ${catFinal} em ${pctCat}%.`;
     }
 
-    if (item.metodo === 'CREDITO' && item.cartao_nome) {
-      const objCartao = cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome));
-      if (objCartao && Number(objCartao.limite) > 0) {
+    if (isCredito && cartaoObj) {
+      if (Number(cartaoObj.limite) > 0) {
         const gastoAcumuladoCartao = todasTransacoes
-          .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(objCartao.nome) && !t.fatura_paga && t.anoMes >= anoMesPadrao)
+          .filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoObj.nome) && !t.fatura_paga && t.anoMes >= anoMesPadrao)
           .reduce((a, b) => a + Number(b.valor || 0), 0);
 
-        const limiteTotal = Number(objCartao.limite);
+        const limiteTotal = Number(cartaoObj.limite);
         const disponivel = limiteTotal - gastoAcumuladoCartao;
         const pctCartao = Math.round((gastoAcumuladoCartao / limiteTotal) * 100);
 
-        if (pctCartao >= 100) alertasExtras += `\n🚨 *ALERTA:* O limite do *${objCartao.nome}* estourou!`;
-        else if (pctCartao >= 80) alertasExtras += `\n⚠️ *Alerta de Limite (${objCartao.nome}):* ${pctCartao}% comprometido!`;
-        else alertasExtras += `\n💳 _Disponível no ${objCartao.nome}: R$ ${disponivel.toFixed(2)}_`;
+        if (pctCartao >= 100) alertasExtras += `\n🚨 *ALERTA:* O limite do *${cartaoObj.nome}* estourou!`;
+        else if (pctCartao >= 80) alertasExtras += `\n⚠️ *Alerta de Limite (${cartaoObj.nome}):* ${pctCartao}% comprometido!`;
+        else alertasExtras += `\n💳 _Disponível no ${cartaoObj.nome}: R$ ${disponivel.toFixed(2)}_`;
       }
     }
 
-    if (item.metodo !== 'CREDITO' && item.banco_nome) {
+    if (!isCredito && item.banco_nome) {
       const idxBanco = bancos.findIndex(b => semAcento(b.nome) === semAcento(item.banco_nome));
       if (idxBanco !== -1) {
         const bObj = bancos[idxBanco];
@@ -734,7 +756,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       }
     }
 
-    const origemPagamento = item.metodo === 'CREDITO' ? `Cartão ${item.cartao_nome}` : item.banco_nome ? `${item.metodo} (${item.banco_nome})` : item.metodo;
+    const origemPagamento = isCredito ? `Cartão ${item.cartao_nome}` : item.banco_nome ? `${item.metodo} (${item.banco_nome})` : item.metodo;
 
     respostas.push(
       `🧠 *[Aprendido]* ✅ *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
@@ -750,7 +772,6 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 // ============================================================================
 async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
   const userRef = db.collection('users').doc(userId);
-
   const prontos = [];
   const pendentes = [];
 
@@ -775,7 +796,6 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
   }
 
   let msgs = [];
-
   if (prontos.length > 0) {
     const resps = await gravarItensNoBanco(userId, prontos, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal);
     msgs.push(...resps);
