@@ -26,7 +26,7 @@ import {
 
 const RENDER_API_URL = 'https://financeiro-saas-production-66cc.up.railway.app';
 const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'FinZapKey2026';
-const MASTER_EMAIL = 'icaro.kts@gmail.com'; // O seu email Master
+const MASTER_EMAIL = 'icaro.kts@gmail.com'; 
 
 const formatarDataBR = (isoDate) => {
   if (!isoDate || !isoDate.includes('-')) return isoDate || '-';
@@ -75,20 +75,27 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   return { categoria: null, subcategoria: null, reconhecida: false };
 };
 
+// Matemática Robusta de Avanço de Fatura
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
-  const dataCompra = new Date(dataCompraIso + 'T12:00:00');
+  const dFech = Number(diaFechamento) || 5;
+  const dVenc = Number(diaVencimento) || 12;
+
+  const [anoStr, mesStr, diaStr] = dataCompraIso.split('T')[0].split('-');
+  const dataCompra = new Date(Number(anoStr), Number(mesStr) - 1, Number(diaStr));
+
   let anoFatura = dataCompra.getFullYear();
   let mesFatura = dataCompra.getMonth(); 
   const diaCompra = dataCompra.getDate();
 
-  if (diaCompra >= diaFechamento) mesFatura += 1;
-  if (diaVencimento < diaFechamento) mesFatura += 1;
+  if (diaCompra >= dFech) mesFatura += 1;
+  if (dVenc < dFech) mesFatura += 1;
+  
   mesFatura += (parcelaAtual - 1);
 
-  const dataVenc = new Date(anoFatura, mesFatura, diaVencimento);
+  const dataVenc = new Date(anoFatura, mesFatura, dVenc);
   const anoRes = dataVenc.getFullYear();
   const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
-  const diaRes = String(diaVencimento).padStart(2, '0');
+  const diaRes = String(dVenc).padStart(2, '0');
 
   return { anoMes: `${anoRes}-${mesRes}`, dataVencimento: `${anoRes}-${mesRes}-${diaRes}` };
 };
@@ -208,7 +215,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ O sistema avança o mês no Cartão de Crédito inteligente.\n2️⃣ Mercado Livre vai para Compras Online automaticamente.\n3️⃣ "Exportar Excel" a funcionar 100%!\n\nEnvie "teste" para checar a conexão.' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ O sistema avança o mês no Cartão de Crédito inteligente.\n2️⃣ O Extrato agora mostra claramente o Mês da Fatura!\n3️⃣ "Exportar Excel" a funcionar 100%!\n\nEnvie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -508,7 +515,6 @@ export default function App() {
     setBancos(novaLista);
     await setDoc(doc(db, 'users', user.uid), { bancos: novaLista }, { merge: true });
   };
-
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
     if (!formAgendamento.descricao || !formAgendamento.valor || !user) return;
@@ -602,6 +608,7 @@ export default function App() {
     });
   };
 
+  // Lógica Flexível de Lançamento (Cartão, PIX, Dinheiro, Carnê)
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
     if (!novaCompraCartao.descricao || !novaCompraCartao.valorTotal || !user) return;
@@ -1265,6 +1272,7 @@ export default function App() {
       setProcessando(false);
     }
   };
+
   const exportarParaExcel = () => {
     if (listaMovimentacaoExtrato.length === 0) return alert('Não há dados para exportar.');
     const cabecalho = 'Data,Descrição,Categoria,Subcategoria,Valor,Tipo,Método/Origem,Status\n';
