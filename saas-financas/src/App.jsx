@@ -5,7 +5,7 @@ import {
   FolderPlus, Target, AlertTriangle, Sparkles, CheckCircle2, 
   Clock, Zap, BrainCircuit, RefreshCw, Landmark, 
   Edit3, X, ShieldAlert, Search, FileText, BellRing, 
-  ArrowRightLeft, ChevronLeft, ChevronRight
+  ArrowRightLeft, ChevronLeft, ChevronRight, Users
 } from 'lucide-react';
 import { db, auth } from './firebaseConfig';
 import { 
@@ -26,6 +26,7 @@ import {
 
 const RENDER_API_URL = 'https://financeiro-saas-production-66cc.up.railway.app';
 const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'FinZapKey2026';
+const MASTER_EMAIL = 'icaro.kts@gmail.com'; // O seu email Master
 
 const formatarDataBR = (isoDate) => {
   if (!isoDate || !isoDate.includes('-')) return isoDate || '-';
@@ -37,12 +38,9 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   const pLimpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   if (isReceita) return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
 
-  // PRIORIDADE 1: Compras Online e E-commerce (Impede conflito com "mercado")
   if (/mercado livre|shopee|amazon|shein|aliexpress|magalu|magazine|americanas/i.test(pLimpo)) {
     return { categoria: 'Outros', subcategoria: 'Compras Online', reconhecida: true };
   }
-
-  // PRIORIDADE 2: Mercado e Alimentação
   if (/mercado|supermercado|atacadao|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|ovo|leite|pao|queijo|sabao|detergente/i.test(pLimpo)) {
     return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
@@ -98,6 +96,7 @@ const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, p
 export default function App() {
   const [user, setUser] = useState(null);
   const [carregandoAuth, setCarregandoAuth] = useState(true);
+  const isMaster = user?.email === MASTER_EMAIL;
 
   const [isLoginMode, setIsLoginMode] = useState(true);
   const [emailInput, setEmailInput] = useState('');
@@ -110,6 +109,7 @@ export default function App() {
 
   const [abaAtiva, setAbaAtiva] = useState('dashboard');
   const [transacoes, setTransacoes] = useState([]);
+  const [clientesAdmin, setClientesAdmin] = useState([]);
 
   const [cartoes, setCartoes] = useState([
     { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12, banco: 'Itaú' },
@@ -308,6 +308,24 @@ export default function App() {
       unsubTrans();
     };
   }, [user]);
+
+  useEffect(() => {
+    if (user && isMaster) {
+      const fetchAdminData = async () => {
+        try {
+          const querySnapshot = await getDocs(collection(db, 'users'));
+          const listaClientes = [];
+          querySnapshot.forEach((d) => {
+            listaClientes.push({ id: d.id, ...d.data() });
+          });
+          setClientesAdmin(listaClientes);
+        } catch (error) {
+          console.error("Erro ao procurar clientes", error);
+        }
+      };
+      fetchAdminData();
+    }
+  }, [user, isMaster]);
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
@@ -539,6 +557,7 @@ export default function App() {
     });
     setModalBaixaConta(null);
   };
+
   const adicionarContaFixa = async (e) => {
     e.preventDefault();
     if (!fixaNome || !fixaValor || !user) return;
@@ -1246,7 +1265,6 @@ export default function App() {
       setProcessando(false);
     }
   };
-
   const exportarParaExcel = () => {
     if (listaMovimentacaoExtrato.length === 0) return alert('Não há dados para exportar.');
     const cabecalho = 'Data,Descrição,Categoria,Subcategoria,Valor,Tipo,Método/Origem,Status\n';
@@ -1332,34 +1350,37 @@ export default function App() {
     );
   }
 
-  if (statusAssinatura === 'VERIFICANDO') {
-    return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-emerald-400 font-medium">Verificando licença...</div>;
-  }
+  // Se for o MASTER, ignora a tela de verificação e bloqueio
+  if (!isMaster) {
+    if (statusAssinatura === 'VERIFICANDO') {
+      return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-emerald-400 font-medium">Verificando licença...</div>;
+    }
 
-  if (statusAssinatura === 'INATIVO' || statusAssinatura === 'EXPIRADO') {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
-        <div className="bg-slate-900/80 backdrop-blur-xl border border-slate-800 p-8 rounded-3xl w-full max-w-lg shadow-2xl text-center">
-          <div className="w-16 h-16 bg-emerald-500/10 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto mb-6"><Sparkles className="w-8 h-8" /></div>
-          <h2 className="text-2xl font-bold mb-2">Desbloqueie o FinZap Pro</h2>
-          <p className="text-sm text-slate-400 mb-8">Sua conta está inativa. Assine agora para ter acesso ao robô do WhatsApp, painel completo e IA.</p>
-          <div className="bg-slate-950 border border-emerald-500/30 rounded-2xl p-6 mb-8 text-left space-y-4">
-            <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Lançamentos no WhatsApp IA</div>
-            <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Alertas automáticos de Vencimento</div>
-            <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Gestão ilimitada de Cartões e Bancos</div>
-            <div className="mt-4 pt-4 border-t border-slate-800 text-center"><strong className="text-2xl text-emerald-400">R$ 49,90</strong><span className="text-xs text-slate-500"> /mês</span></div>
-          </div>
-          {linkPagamentoAsaas ? (
-            <div className="space-y-4">
-              <p className="text-sm font-semibold text-amber-400">Fatura gerada!</p>
-              <a href={linkPagamentoAsaas} target="_blank" rel="noreferrer" className="block w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl transition">Pagar com PIX Agora</a>
-              <p className="text-xs text-slate-500 mt-2">Acesso liberado automaticamente após o pagamento.</p>
+    if (statusAssinatura === 'INATIVO' || statusAssinatura === 'EXPIRADO') {
+      return (
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+          <div className="bg-slate-900/80 backdrop-blur-xl border border-slate-800 p-8 rounded-3xl w-full max-w-lg shadow-2xl text-center">
+            <div className="w-16 h-16 bg-emerald-500/10 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto mb-6"><Sparkles className="w-8 h-8" /></div>
+            <h2 className="text-2xl font-bold mb-2">Desbloqueie o FinZap Pro</h2>
+            <p className="text-sm text-slate-400 mb-8">Sua conta está inativa. Assine agora para ter acesso ao robô do WhatsApp, painel completo e IA.</p>
+            <div className="bg-slate-950 border border-emerald-500/30 rounded-2xl p-6 mb-8 text-left space-y-4">
+              <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Lançamentos no WhatsApp IA</div>
+              <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Alertas automáticos de Vencimento</div>
+              <div className="flex items-center gap-3 text-sm"><CheckCircle2 className="w-5 h-5 text-emerald-400" /> Gestão ilimitada de Cartões e Bancos</div>
+              <div className="mt-4 pt-4 border-t border-slate-800 text-center"><strong className="text-2xl text-emerald-400">R$ 49,90</strong><span className="text-xs text-slate-500"> /mês</span></div>
             </div>
-          ) : <button onClick={assinarPlanoPro} disabled={gerandoPix} className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition">{gerandoPix ? <RefreshCw className="w-5 h-5 animate-spin" /> : 'Assinar com PIX'}</button>}
-          <button onClick={handleLogout} className="mt-6 text-xs text-rose-400 hover:underline">Sair da conta</button>
+            {linkPagamentoAsaas ? (
+              <div className="space-y-4">
+                <p className="text-sm font-semibold text-amber-400">Fatura gerada!</p>
+                <a href={linkPagamentoAsaas} target="_blank" rel="noreferrer" className="block w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl transition">Pagar com PIX Agora</a>
+                <p className="text-xs text-slate-500 mt-2">Acesso liberado automaticamente após o pagamento.</p>
+              </div>
+            ) : <button onClick={assinarPlanoPro} disabled={gerandoPix} className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3.5 rounded-xl flex items-center justify-center gap-2 transition">{gerandoPix ? <RefreshCw className="w-5 h-5 animate-spin" /> : 'Assinar com PIX'}</button>}
+            <button onClick={handleLogout} className="mt-6 text-xs text-rose-400 hover:underline">Sair da conta</button>
+          </div>
         </div>
-      </div>
-    );
+      );
+    }
   }
 
   // ==========================================================================
@@ -1901,6 +1922,13 @@ export default function App() {
               </span>
               <span className={`w-2.5 h-2.5 rounded-full ${whatsappStatus === 'CONNECTED' ? 'bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-amber-400 animate-pulse'}`}></span>
             </button>
+
+            {/* ABA MASTER ADMIN */}
+            {isMaster && (
+              <button onClick={() => setAbaAtiva('admin')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition mt-4 border ${abaAtiva === 'admin' ? 'bg-amber-500 text-slate-950 font-semibold border-amber-400 shadow-lg shadow-amber-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20'}`}>
+                <Users className="w-4 h-4" /> Painel Master
+              </button>
+            )}
           </nav>
         </div>
 
@@ -1920,46 +1948,91 @@ export default function App() {
         
         <div className="lg:col-span-2 space-y-6">
 
-          {/* SELETOR GLOBAL DE MÊS VISÍVEL EM TODAS AS ABAS */}
-          <div className="bg-slate-900/70 backdrop-blur-xl border border-slate-800/80 p-3.5 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-3 shadow-xl">
-            <div className="flex items-center gap-2 text-slate-200 text-xs font-semibold">
-              <Calendar className="w-4 h-4 text-emerald-400" />
-              <span>Competência Financeira Ativa:</span>
+          {/* PAINEL ADMIN MASTER */}
+          {abaAtiva === 'admin' && isMaster && (
+            <div className="space-y-6">
+              <div className="bg-gradient-to-r from-amber-950/40 via-slate-900 to-slate-900 border border-amber-500/30 p-6 rounded-2xl flex items-center gap-4 shadow-xl">
+                <div className="w-12 h-12 bg-amber-500/20 text-amber-400 rounded-xl flex items-center justify-center">
+                  <Users className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-slate-100">Painel de Clientes (Master)</h2>
+                  <p className="text-xs text-slate-400 mt-1">Gerencie todos os utilizadores do FinZap SaaS.</p>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
+                <div className="space-y-3">
+                  {clientesAdmin.length === 0 ? (
+                    <p className="text-sm text-slate-500 text-center py-4">Nenhum cliente carregado.</p>
+                  ) : (
+                    clientesAdmin.map(cliente => (
+                      <div key={cliente.id} className="bg-slate-950/70 border border-slate-800 p-4 rounded-xl flex items-center justify-between">
+                        <div>
+                          <p className="font-bold text-sm text-slate-200">{cliente.id}</p>
+                          <div className="flex gap-3 mt-1.5">
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${cliente.status_assinatura === 'ATIVO' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                              Plano: {cliente.status_assinatura || 'INATIVO'}
+                            </span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${cliente.whatsapp_status === 'CONNECTED' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
+                              WPP: {cliente.whatsapp_status || 'DESCONECTADO'}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[10px] text-slate-500 uppercase">Validade</p>
+                          <p className="text-xs font-semibold text-amber-400">{cliente.plano_validade ? formatarDataBR(cliente.plano_validade) : 'N/A'}</p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button 
-                type="button" onClick={() => alterarMesCompetencia(-1)}
-                className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-xl text-slate-300 transition"
-                title="Mês Anterior"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <input 
-                type="month" 
-                value={filtroMesAno} 
-                onChange={e => setFiltroMesAno(e.target.value)} 
-                className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-1.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-emerald-500 transition"
-              />
-              <button 
-                type="button" onClick={() => alterarMesCompetencia(1)}
-                className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-xl text-slate-300 transition"
-                title="Próximo Mês"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-              {filtroMesAno !== mesAtualStr && (
+          )}
+
+          {/* SELETOR GLOBAL DE MÊS VISÍVEL NAS ABAS NORMAIS */}
+          {abaAtiva !== 'admin' && (
+            <div className="bg-slate-900/70 backdrop-blur-xl border border-slate-800/80 p-3.5 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-3 shadow-xl">
+              <div className="flex items-center gap-2 text-slate-200 text-xs font-semibold">
+                <Calendar className="w-4 h-4 text-emerald-400" />
+                <span>Competência Financeira Ativa:</span>
+              </div>
+              <div className="flex items-center gap-2">
                 <button 
-                  type="button" onClick={() => setFiltroMesAno(mesAtualStr)}
-                  className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-1.5 rounded-xl font-semibold"
+                  type="button" onClick={() => alterarMesCompetencia(-1)}
+                  className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-xl text-slate-300 transition"
+                  title="Mês Anterior"
                 >
-                  Mês Atual
+                  <ChevronLeft className="w-4 h-4" />
                 </button>
-              )}
+                <input 
+                  type="month" 
+                  value={filtroMesAno} 
+                  onChange={e => setFiltroMesAno(e.target.value)} 
+                  className="bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-1.5 text-xs text-emerald-400 font-bold focus:outline-none focus:border-emerald-500 transition"
+                />
+                <button 
+                  type="button" onClick={() => alterarMesCompetencia(1)}
+                  className="p-2 bg-slate-950 hover:bg-slate-800 border border-slate-800 rounded-xl text-slate-300 transition"
+                  title="Próximo Mês"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+                {filtroMesAno !== mesAtualStr && (
+                  <button 
+                    type="button" onClick={() => setFiltroMesAno(mesAtualStr)}
+                    className="text-[11px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-1.5 rounded-xl font-semibold"
+                  >
+                    Mês Atual
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* BANNER DE ALERTA: WHATSAPP DESCONECTADO */}
-          {whatsappStatus !== 'CONNECTED' && (
+          {abaAtiva !== 'admin' && whatsappStatus !== 'CONNECTED' && (
             <div className="bg-amber-500/10 border border-amber-500/30 p-4 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xl">
               <div className="flex items-center gap-3.5">
                 <div className="w-10 h-10 bg-amber-500/20 text-amber-400 rounded-xl flex items-center justify-center shrink-0 border border-amber-500/30">
@@ -1986,7 +2059,7 @@ export default function App() {
           )}
 
           {/* BANNER DE ALERTA DE USO DO CHEQUE ESPECIAL */}
-          {saldosPorBanco.filter(b => b.emChequeEspecial).map(b => (
+          {abaAtiva !== 'admin' && saldosPorBanco.filter(b => b.emChequeEspecial).map(b => (
             <div key={b.id} className="p-4 rounded-2xl border bg-rose-500/15 border-rose-500/50 flex items-center justify-between gap-4 shadow-xl">
               <div className="flex items-center gap-3">
                 <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 animate-pulse" />
@@ -2006,7 +2079,7 @@ export default function App() {
           ))}
 
           {/* BANNER DE ALERTA DE LIMITE DE CARTÃO DE CRÉDITO */}
-          {resumoCartoes.filter(c => c.alerta80).map(c => (
+          {abaAtiva !== 'admin' && resumoCartoes.filter(c => c.alerta80).map(c => (
             <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between gap-4 shadow-xl ${c.estourado ? 'bg-rose-500/10 border-rose-500/40' : 'bg-amber-500/10 border-amber-500/30'}`}>
               <div className="flex items-center gap-3">
                 <ShieldAlert className={`w-5 h-5 shrink-0 ${c.estourado ? 'text-rose-400' : 'text-amber-400'}`} />
