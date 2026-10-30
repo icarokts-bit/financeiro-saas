@@ -5,7 +5,9 @@ import QRCode from 'qrcode';
 import pino from 'pino';
 import admin from 'firebase-admin';
 
-// 1. Inicialização do Firebase Admin
+// ============================================================================
+// 1. INICIALIZAÇÃO DO FIREBASE E EXPRESS
+// ============================================================================
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
   console.error('❌ ERRO: Variável FIREBASE_SERVICE_ACCOUNT não configurada!');
 } else {
@@ -58,10 +60,61 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
   return msgEnviada;
 }
 
-// Rotas da API (Com a segurança aplicada corretamente e sem erros de sintaxe)
+// ============================================================================
+// ROTAS ASAAS, CONEXÃO E WEBHOOKS
+// ============================================================================
 app.get('/', (req, res) => {
   verificarAlertasVencimento(false).catch(() => {});
   res.status(200).send('OK');
+});
+
+const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://sandbox.asaas.com/api/v3';
+const ASAAS_API_KEY = process.env.ASAAS_API_KEY;
+
+app.post('/asaas/gerar-cobranca', validarApiKey, async (req, res) => {
+  const { userId, email, nome, valor } = req.body;
+  try {
+    const clienteRes = await fetch(`${ASAAS_API_URL}/customers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'access_token': ASAAS_API_KEY },
+      body: JSON.stringify({ name: nome || 'Cliente FinZap', email, externalReference: userId })
+    });
+    const cliente = await clienteRes.json();
+
+    const cobrancaRes = await fetch(`${ASAAS_API_URL}/payments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'access_token': ASAAS_API_KEY },
+      body: JSON.stringify({
+        customer: cliente.id,
+        billingType: 'PIX',
+        value: valor || 49.90, 
+        dueDate: new Date().toISOString().split('T')[0],
+        description: 'Assinatura Mensal FinZap SaaS',
+        externalReference: userId 
+      })
+    });
+    
+    const cobranca = await cobrancaRes.json();
+    res.json({ invoiceUrl: cobranca.invoiceUrl, id: cobranca.id });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao gerar cobrança no Asaas' });
+  }
+});
+
+app.post('/webhook/asaas', async (req, res) => {
+  const { event, payment } = req.body;
+  if (event === 'PAYMENT_RECEIVED' || event === 'PAYMENT_CONFIRMED') {
+    const userId = payment.externalReference; 
+    if (userId) {
+      const validade = new Date();
+      validade.setDate(validade.getDate() + 30);
+      await db.collection('users').doc(userId).set({
+        status_assinatura: 'ATIVO',
+        plano_validade: validade.toISOString().split('T')[0]
+      }, { merge: true });
+    }
+  }
+  res.status(200).send('Webhook processado com sucesso');
 });
 
 app.get('/verificar-alertas', validarApiKey, async (req, res) => {
@@ -456,7 +509,6 @@ function extrairDataVencimento(texto) {
       trechoRemovido: matchDia[0]
     };
   }
-
   return null;
 }
 
@@ -567,22 +619,35 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 
     await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
 
+    // Lógica inteligente de data para garantir 1ª parcela no mês certo
+    const dataReferencia = new Date((item.data_vencimento || hojeStr) + 'T12:00:00');
+    let diaVenc = dataReferencia.getDate();
+    let mesVenc = dataReferencia.getMonth();
+    let anoVenc = dataReferencia.getFullYear();
+
+    const dataHojeLocal = new Date();
+    if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && item.metodo !== 'CREDITO') {
+      mesVenc += 1;
+    }
+
     for (let i = 0; i < parcelasTotal; i++) {
       let anoMesItem = item.anoMes || anoMesPadrao;
       let dataVencItem = item.data_vencimento || hojeStr;
 
       if (parcelasTotal > 1) {
-        const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
+        const dataParcela = new Date(anoVenc, mesVenc + i, diaVenc);
         const anoM = dataParcela.getFullYear();
         const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+        const diaM = String(dataParcela.getDate()).padStart(2, '0');
+        
         anoMesItem = `${anoM}-${mesM}`;
-        dataVencItem = `${anoM}-${mesM}-15`;
+        dataVencItem = `${anoM}-${mesM}-${diaM}`;
       }
 
       const isCredito = item.metodo === 'CREDITO';
       let statusPago = item.pago !== undefined ? item.pago : true;
       if (parcelasTotal > 1 && !isCredito) {
-        statusPago = (i === 0); 
+        statusPago = false; 
       }
 
       const novoDoc = {
@@ -610,12 +675,12 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       todasTransacoes.push(novoDoc);
     }
 
-    if (isAgendado) {
+    if (isAgendado || (parcelasTotal > 1 && item.metodo !== 'CREDITO')) {
       respostas.push(
         `📅 *Conta Lançada (${item.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n` +
         `• *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
         `• Valor: *R$ ${valorParcela.toFixed(2)}*\n` +
-        `• Vencimento: *${formatarDataBR(item.data_vencimento)}*`
+        `• Primeiro Vencimento: *${diaVenc}/${String(mesVenc + 1).padStart(2, '0')}/${anoVenc}*`
       );
       continue;
     }
@@ -681,7 +746,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 }
 
 // ============================================================================
-// 7. FILA DE PENDÊNCIAS
+// 7. FILA DE PENDÊNCIAS COM PERGUNTA DE DATA
 // ============================================================================
 async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
   const userRef = db.collection('users').doc(userId);
@@ -700,8 +765,9 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
     const precisaMetodo = !item.metodo && item.pago !== false;
     const precisaBanco = (item.metodo === 'PIX' || item.metodo === 'DEBITO') && !item.banco_nome && item.pago !== false;
     const precisaCategoria = !item.categoria || item.precisaPerguntarCategoria;
+    const precisaData = item.precisaPerguntarData;
 
-    if (!precisaMetodo && !precisaBanco && !precisaCategoria) {
+    if (!precisaMetodo && !precisaBanco && !precisaCategoria && !precisaData) {
       prontos.push(item);
     } else {
       pendentes.push(item);
@@ -724,7 +790,10 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
       .map(i => `• *${i.descricao}* [${i.categoria || '?'} > ${i.subcategoria || '?'}] — R$ ${i.valorTotal.toFixed(2)}`)
       .join('\n');
 
-    if (!primeiro.metodo && primeiro.pago !== false) {
+    if (primeiro.precisaPerguntarData) {
+      etapa = 'DATA';
+      textoPergunta = `📅 *Qual a data do primeiro vencimento?*\n${resumoPendentes}\n\nResponda com o dia (ex: *dia 20*) ou a data (ex: *20/11*).`;
+    } else if (!primeiro.metodo && primeiro.pago !== false) {
       etapa = 'METODO';
       const opcoesCartoes = cartoes.map(c => c.nome).join(', ');
       textoPergunta =
@@ -857,7 +926,19 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       if (Array.isArray(pendente.itens) && pendente.itens.length > 0) {
         let itensAtualizados = [...pendente.itens];
 
-        if (pendente.etapa === 'METODO') {
+        if (pendente.etapa === 'DATA') {
+          const infoVenc = extrairDataVencimento(textoUsuario) || extrairDataVencimento(`dia ${textoUsuario.replace(/\D/g, '')}`);
+          if (infoVenc && infoVenc.dataVencimento) {
+            itensAtualizados = itensAtualizados.map(it => ({
+              ...it,
+              data_vencimento: infoVenc.dataVencimento,
+              anoMes: infoVenc.anoMes,
+              precisaPerguntarData: false
+            }));
+            await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, pendente.textoOriginal, sock, remoteJid);
+            return;
+          }
+        } else if (pendente.etapa === 'METODO') {
           let metodoResp = null;
           let cartaoResp = null;
           let bancoResp = null;
@@ -1113,11 +1194,15 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         sub = classif.subcategoria;
       }
 
+      const matchParcelas = pLimpo.match(/(\d+)\s*(?:x|vezes|parcelas)/);
+      const parcelasTotal = matchParcelas ? parseInt(matchParcelas[1]) : 1;
+      const valorParcela = parcelasTotal > 1 ? Number((valorTotal / parcelasTotal).toFixed(2)) : valorTotal;
+
       itensExtraidos.push({
         descricao,
         valorTotal,
-        valorParcela: valorTotal,
-        parcelasTotal: 1,
+        valorParcela: valorParcela,
+        parcelasTotal: parcelasTotal,
         tipo: isReceita ? 'RECEITA' : 'DESPESA',
         metodo,
         cartao_nome: cartaoNome,
@@ -1125,6 +1210,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         categoria: cat,
         subcategoria: sub,
         precisaPerguntarCategoria: !cat,
+        precisaPerguntarData: (parcelasTotal > 1 || isAgendado) && !infoVenc,
         pago: !isAgendado,
         data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeStr,
         anoMes: infoVenc ? infoVenc.anoMes : anoMesAtual

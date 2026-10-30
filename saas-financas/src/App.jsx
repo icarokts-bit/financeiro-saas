@@ -190,7 +190,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ "comprei maçã 5,00 no débito" -> Reconhece Alimentação > Mercado e pergunta de qual banco saiu!\n2️⃣ "comprei lanche 35,00" -> Vai para Alimentação > Lazer.\n3️⃣ "transferir 200 do Itaú para Nubank"\n4️⃣ "paguei a água" -> Dá baixa pelo WhatsApp.\n5️⃣ Envie "teste" para checar a conexão.' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ "comprei maçã 5,00 no débito"\n2️⃣ "PC 1000 em 10x" -> Agora pergunto o dia do vencimento se não informar!\n3️⃣ "transferir 200 do Itaú para Nubank"\n4️⃣ "paguei a água" -> Dá baixa pelo WhatsApp.\n5️⃣ Envie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -590,6 +590,12 @@ export default function App() {
       const anoM = dParc.getFullYear();
       const mesM = String(dParc.getMonth() + 1).padStart(2, '0');
 
+      // NOVA LÓGICA: Se for parcelado e NÃO for crédito, só a 1ª parcela fica paga.
+      let statusPago = true;
+      if (parcelasTotal > 1 && !isCredito) {
+        statusPago = (i === 0); 
+      }
+
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
         descricao: parcelasTotal > 1 ? `${novaCompraCartao.descricao} (${i + 1}/${parcelasTotal})` : novaCompraCartao.descricao,
         valor: valorParcela,
@@ -603,7 +609,7 @@ export default function App() {
         parcelas_total: parcelasTotal,
         grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
-        pago: isCredito, 
+        pago: isCredito ? true : statusPago, 
         data_vencimento: `${anoM}-${mesM}-15`,
         anoMes: `${anoM}-${mesM}`,
         mensagem_original: `Lançamento manual parcelado`,
@@ -866,7 +872,8 @@ export default function App() {
     let bancoIdentificado = null;
 
     for (const c of cartoes) {
-      if (txtLower.includes(c.nome.toLowerCase())) {
+      const nCartao = c.nome.toLowerCase();
+      if (txtLower.includes(nCartao) || nCartao.includes(txtLower)) {
         cartaoIdentificado = c.nome;
         metodo = 'CREDITO';
         break;
@@ -874,7 +881,8 @@ export default function App() {
     }
 
     for (const b of bancos) {
-      if (txtLower.includes(b.nome.toLowerCase())) {
+      const nBanco = b.nome.toLowerCase();
+      if (txtLower.includes(nBanco) || nBanco.includes(txtLower)) {
         bancoIdentificado = b.nome;
         if (!metodo) metodo = /débito|debito/i.test(txtLower) ? 'DEBITO' : 'PIX';
         break;
@@ -923,6 +931,7 @@ export default function App() {
       categoria: classif.categoria,
       subcategoria: classif.subcategoria,
       precisaPerguntarCategoria: !classif.reconhecida,
+      precisaPerguntarData: (parcelasTotal > 1 || isAgendado) && !infoVenc,
       pago: !isAgendado,
       data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeIso,
       anoMes: infoVenc ? infoVenc.anoMes : filtroMesAno
@@ -939,23 +948,34 @@ export default function App() {
       const subFinal = dados.subcategoria || 'Geral';
       const grupoId = `compra_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+      const dataReferencia = new Date((dados.data_vencimento || hojeIso) + 'T12:00:00');
+      let diaVenc = dataReferencia.getDate();
+      let mesVenc = dataReferencia.getMonth();
+      let anoVenc = dataReferencia.getFullYear();
+
+      const dataHojeLocal = new Date();
+      if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && dados.metodo !== 'CREDITO') {
+        mesVenc += 1;
+      }
+
       for (let i = 0; i < pTotal; i++) {
         let anoMesItem = dados.anoMes || filtroMesAno;
         let dataVencItem = dados.data_vencimento || hojeIso;
 
         if (pTotal > 1) {
-          const dataParcela = new Date(hoje.getFullYear(), hoje.getMonth() + i, 15);
+          const dataParcela = new Date(anoVenc, mesVenc + i, diaVenc);
           const anoM = dataParcela.getFullYear();
           const mesM = String(dataParcela.getMonth() + 1).padStart(2, '0');
+          const diaM = String(dataParcela.getDate()).padStart(2, '0');
+          
           anoMesItem = `${anoM}-${mesM}`;
-          dataVencItem = `${anoM}-${mesM}-15`;
+          dataVencItem = `${anoM}-${mesM}-${diaM}`;
         }
         
-        // NOVA LÓGICA: Se for parcelado e NÃO for crédito, só a 1ª parcela fica paga.
         const isCredito = dados.metodo === 'CREDITO';
         let statusPago = dados.pago !== undefined ? dados.pago : true;
         if (pTotal > 1 && !isCredito) {
-          statusPago = (i === 0); 
+          statusPago = false; 
         }
 
         await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
@@ -979,14 +999,14 @@ export default function App() {
         });
       }
 
-      if (dados.pago === false) {
+      if (dados.pago === false || (pTotal > 1 && dados.metodo !== 'CREDITO')) {
         resumoRespostas.push(
-          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} >${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Vencimento: *${formatarDataBR(dados.data_vencimento)}*`
+          `📅 *Conta Agendada (${dados.tipo === 'RECEITA' ? 'A Receber' : 'A Vencer'})*\n• *${dados.descricao}* [${catFinal} > ${subFinal}] — R$ ${dados.valorParcela.toFixed(2)}\n• Primeiro Vencimento: *${diaVenc}/${String(mesVenc + 1).padStart(2, '0')}/${anoVenc}*`
         );
       } else {
         const origem = dados.metodo === 'CREDITO' ? `Cartão ${dados.cartao_nome}` : `${dados.metodo} (${dados.banco_nome || 'Geral'})`;
         resumoRespostas.push(
-          `✅ *${dados.descricao}* [${catFinal} > ${subFinal}]: R$ ${dados.valorParcela.toFixed(2)}${pTotal > 1 ? `(${pTotal}x)` : ''} • ${origem}`
+          `✅ *${dados.descricao}* [${catFinal} > ${subFinal}]: R$ ${dados.valorParcela.toFixed(2)} ${pTotal > 1 ? `(${pTotal}x)` : ''} • ${origem}`
         );
       }
     }
@@ -1002,8 +1022,9 @@ export default function App() {
       const faltaMetodo = !item.metodo && item.pago !== false;
       const faltaBanco = (item.metodo === 'PIX' || item.metodo === 'DEBITO') && !item.banco_nome && item.pago !== false;
       const faltaCat = !item.categoria || item.precisaPerguntarCategoria;
+      const faltaData = item.precisaPerguntarData;
 
-      if (!faltaMetodo && !faltaBanco && !faltaCat) prontos.push(item);
+      if (!faltaMetodo && !faltaBanco && !faltaCat && !faltaData) prontos.push(item);
       else pendentes.push(item);
     }
 
@@ -1017,7 +1038,10 @@ export default function App() {
       const prim = pendentes[0];
       const listaStr = pendentes.map(i => `• *${i.descricao}* — R$ ${i.valorTotal.toFixed(2)}`).join('\n');
 
-      if (!prim.metodo && prim.pago !== false) {
+      if (prim.precisaPerguntarData) {
+        setPendenteSimulador({ etapa: 'DATA', itens: pendentes, textoOriginal });
+        msgs.push(`📅 *Qual a data do primeiro vencimento?*\n${listaStr}\n\nResponda com o dia (ex: *dia 20*) ou a data (ex: *20/11*).`);
+      } else if (!prim.metodo && prim.pago !== false) {
         setPendenteSimulador({ etapa: 'METODO', itens: pendentes, textoOriginal });
         msgs.push(`❓ *Qual foi a forma de pagamento?*\n${listaStr}\n\nResponda com: *Pix*, *Débito*, *Dinheiro* ou o cartão (*${cartoes.map(c => c.nome).join(', ')}*).`);
       } else if ((prim.metodo === 'PIX' || prim.metodo === 'DEBITO') && !prim.banco_nome && prim.pago !== false) {
@@ -1057,7 +1081,20 @@ export default function App() {
       if (pendenteSimulador && pendenteSimulador.itens) {
         let atualizados = [...pendenteSimulador.itens];
 
-        if (pendenteSimulador.etapa === 'METODO') {
+        if (pendenteSimulador.etapa === 'DATA') {
+          const infoVenc = extrairDataTextoSimulador(textoUsuario) || extrairDataTextoSimulador(`dia ${textoUsuario.replace(/\D/g, '')}`);
+          if (infoVenc && infoVenc.dataVencimento) {
+            atualizados = atualizados.map(it => ({
+              ...it,
+              data_vencimento: infoVenc.dataVencimento,
+              anoMes: infoVenc.anoMes,
+              precisaPerguntarData: false
+            }));
+            await verificarPendenciasSimulador(atualizados, pendenteSimulador.textoOriginal);
+            setProcessando(false);
+            return;
+          }
+        } else if (pendenteSimulador.etapa === 'METODO') {
           let metodoResp = null;
           let cartaoResp = null;
           let bancoResp = null;
@@ -1147,7 +1184,7 @@ export default function App() {
         if (prox.length === 0) {
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: '⏳ *Contas Próximas (Até 5 dias)*\n\n🎉 Nenhuma conta em aberto vencendo nos próximos 5 dias!' }]);
         } else {
-          const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence:${formatarDataBR(t.data_vencimento)})`).join('\n');
+          const linhas = prox.map(t => `• *${t.descricao}*: R$ ${Number(t.valor).toFixed(2)} (Vence: ${formatarDataBR(t.data_vencimento)})`).join('\n');
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `⏳ *Contas Próximas do Vencimento (5 dias)*\n\n${linhas}` }]);
         }
         setProcessando(false);
