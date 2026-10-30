@@ -190,7 +190,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ "comprei maçã 5,00 no débito"\n2️⃣ "PC 1000 em 10x" -> Agora pergunto o dia do vencimento se não informar!\n3️⃣ "transferir 200 do Itaú para Nubank"\n4️⃣ "paguei a água" -> Dá baixa pelo WhatsApp.\n5️⃣ Envie "teste" para checar a conexão.' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ "comprei maçã 5,00 no débito" -> Reconhece Alimentação > Mercado e pergunta de qual banco saiu!\n2️⃣ "comprei lanche 35,00" -> Vai para Alimentação > Lazer.\n3️⃣ "transferir 200 do Itaú para Nubank"\n4️⃣ "paguei a água" -> Dá baixa pelo WhatsApp.\n5️⃣ Envie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -1226,6 +1226,23 @@ export default function App() {
     }
   };
 
+  // Função para exportar CSV (Botão adicionado à Aba de Movimentação)
+  const exportarParaExcel = () => {
+    if (listaMovimentacaoExtrato.length === 0) return alert('Não há dados para exportar.');
+    const cabecalho = 'Data,Descrição,Categoria,Subcategoria,Valor,Tipo,Método/Origem,Status\n';
+    const linhas = listaMovimentacaoExtrato.map(t => {
+      const origem = t.isLinhaFatura ? 'FATURA MENSAL' : t.cartao_nome ? `Cartão ${t.cartao_nome}` : t.banco_nome || t.metodo || '';
+      return `${formatarDataBR(t.data_vencimento)},"${t.descricao}","${t.categoria}","${t.subcategoria || ''}",${t.valor},${t.tipo},"${origem}",${t.pago ? 'Pago' : 'Aberto'}`;
+    }).join('\n');
+    const blob = new Blob([cabecalho + linhas], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Extrato_FinZap_${filtroMesAno}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   if (carregandoAuth) {
     return (
       <div className="min-h-screen bg-slate-950 text-emerald-400 flex items-center justify-center font-medium">
@@ -2134,12 +2151,22 @@ export default function App() {
           {abaAtiva === 'movimentacao' && (
             <div className="space-y-6">
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
-                <h2 className="text-lg font-bold flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-emerald-400" /> Extrato de Movimentação ({filtroMesAno})
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Entradas, saídas, transferências, pagamentos de fatura e a projeção da fatura no dia do vencimento.
-                </p>
+                <div className="flex justify-between items-center flex-wrap gap-4">
+                  <div>
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                      <FileText className="w-5 h-5 text-emerald-400" /> Extrato de Movimentação ({filtroMesAno})
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Entradas, saídas, transferências, pagamentos de fatura e a projeção da fatura no dia do vencimento.
+                    </p>
+                  </div>
+                  <button 
+                    onClick={exportarParaExcel}
+                    className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition"
+                  >
+                    📥 Exportar para Excel
+                  </button>
+                </div>
               </div>
 
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
