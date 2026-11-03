@@ -75,57 +75,83 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   return { categoria: null, subcategoria: null, reconhecida: false };
 };
 
-// CORREÇÃO DEFINITIVA: Lógica de Fatura de Cartão de Crédito
+// Matemática Definitiva de Avanço de Fatura
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
   const dFech = Number(diaFechamento) || 5;
   const dVenc = Number(diaVencimento) || 12;
 
-  // Analisa a data da compra mantendo o fuso horário local
   const [anoStr, mesStr, diaStr] = dataCompraIso.split('T')[0].split('-');
   let anoCompra = Number(anoStr);
-  let mesCompra = Number(mesStr) - 1; // 0 a 11 (Janeiro a Dezembro)
+  let mesCompra = Number(mesStr) - 1; 
   const diaCompra = Number(diaStr);
 
   let mesFatura = mesCompra;
   let anoFatura = anoCompra;
 
-  // Se a compra foi feita NO DIA ou DEPOIS do fechamento, 
-  // ela cai na fatura do próximo ciclo.
+  // Se comprou no dia do fechamento ou depois (ex: comprou dia 30/10 e fecha dia 03 ou 04), avança para Novembro
   if (diaCompra >= dFech) {
     mesFatura += 1;
   }
 
-  // Avança os meses consoante a parcela atual (ex: parcela 2 avança +1 mês)
+  // Se o dia de vencimento é menor que o fechamento, vence no mês seguinte
+  if (dVenc < dFech) {
+    mesFatura += 1;
+  }
+
+  // Soma as parcelas seguintes
   mesFatura += (parcelaAtual - 1);
 
-  // Ajusta o ano se a fatura saltar para o ano seguinte
-  while (mesFatura > 11) {
-    mesFatura -= 12;
-    anoFatura += 1;
-  }
-
-  // Cria a data de vencimento final
   const dataVenc = new Date(anoFatura, mesFatura, dVenc);
-  
-  // No JavaScript, se o dia de vencimento for MENOR que o dia de fechamento 
-  // (ex: fecha dia 25, vence dia 5), a fatura vence no mês SEGUINTE ao fechamento.
-  let mesFinal = dataVenc.getMonth();
-  let anoFinal = dataVenc.getFullYear();
-  
-  if (dVenc < dFech) {
-     mesFinal += 1;
-     if (mesFinal > 11) {
-         mesFinal = 0;
-         anoFinal += 1;
-     }
-  }
-
-  const mesRes = String(mesFinal + 1).padStart(2, '0');
+  const anoFinal = dataVenc.getFullYear();
+  const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
   const diaRes = String(dVenc).padStart(2, '0');
 
   return { 
     anoMes: `${anoFinal}-${mesRes}`, 
     dataVencimento: `${anoFinal}-${mesRes}-${diaRes}` 
+  };
+};
+
+// Recalcula em tempo real o ciclo correto para compras já salvas no banco
+const obterCicloFaturaReal = (t, listaCartoes, mesPadrao) => {
+  if (t.metodo !== 'CREDITO' || !t.cartao_nome) {
+    return {
+      anoMes: t.anoMes || mesPadrao,
+      data_vencimento: t.data_vencimento || `${t.anoMes || mesPadrao}-10`
+    };
+  }
+
+  const cartaoObj = listaCartoes.find(c => c.nome?.toLowerCase() === t.cartao_nome?.toLowerCase());
+  if (!cartaoObj) {
+    return {
+      anoMes: t.anoMes || mesPadrao,
+      data_vencimento: t.data_vencimento || `${t.anoMes || mesPadrao}-10`
+    };
+  }
+
+  const diaFech = Number(cartaoObj.diaFechamento) || 5;
+  const diaVenc = Number(cartaoObj.diaVencimento) || 12;
+
+  let dataBaseCompra = null;
+  if (t.data_compra && t.data_compra.includes('-')) {
+    dataBaseCompra = t.data_compra;
+  } else if (t.criadoEm && t.criadoEm.toDate) {
+    const d = t.criadoEm.toDate();
+    dataBaseCompra = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  } else if (t.data_vencimento && t.data_vencimento.includes('-')) {
+    const diaSalvo = Number(t.data_vencimento.split('-')[2]);
+    if (diaSalvo !== diaVenc) {
+      dataBaseCompra = t.data_vencimento;
+    }
+  }
+
+  if (dataBaseCompra) {
+    return calcularDataFaturaCartao(dataBaseCompra, diaFech, diaVenc, t.parcela_atual || 1);
+  }
+
+  return {
+    anoMes: t.anoMes || mesPadrao,
+    data_vencimento: `${t.anoMes || mesPadrao}-${String(diaVenc).padStart(2, '0')}`
   };
 };
 
@@ -178,7 +204,7 @@ export default function App() {
 
   const dataAtualObj = new Date();
   const diaHoje = dataAtualObj.getDate();
-  const hojeIso = dataAtualObj.toISOString().split('T')[0];
+  const hojeIso = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}-${String(dataAtualObj.getDate()).padStart(2, '0')}`;
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
   const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
 
@@ -244,7 +270,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ Prioridade de Cartão corrigida: nunca peço o dia se já souber a forma de pagamento.\n2️⃣ O Extrato agora mostra claramente o Mês da Fatura!\n3️⃣ "Exportar Excel" a funcionar 100%!\n\nEnvie "teste" para checar a conexão.' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ Recálculo automático do ciclo de fatura para compras de Outubro -> Novembro.\n2️⃣ Botão para sincronizar faturas antigas no banco.\n3️⃣ "Exportar Excel" 100% operacional!\n\nEnvie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -326,7 +352,7 @@ export default function App() {
         if (!anoMes && dataDoc.criadoEm) {
           const d = dataDoc.criadoEm.toDate ? dataDoc.criadoEm.toDate() : new Date();
           anoMes = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-          if (!dataIso) dataIso = d.toISOString().split('T')[0];
+          if (!dataIso) dataIso = `${anoMes}-${String(d.getDate()).padStart(2, '0')}`;
         }
 
         return {
@@ -364,6 +390,33 @@ export default function App() {
       fetchAdminData();
     }
   }, [user, isMaster]);
+
+  // Função para corrigir no Firebase todas as compras de cartão gravadas com mês antigo
+  const recalcularFaturasBanco = async () => {
+    if (!user) return;
+    const batch = writeBatch(db);
+    let contador = 0;
+
+    transacoes.forEach(t => {
+      if (t.metodo === 'CREDITO' && t.cartao_nome) {
+        const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
+        if (ciclo.anoMes !== t.anoMes || ciclo.data_vencimento !== t.data_vencimento) {
+          batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
+            anoMes: ciclo.anoMes,
+            data_vencimento: ciclo.data_vencimento
+          });
+          contador++;
+        }
+      }
+    });
+
+    if (contador > 0) {
+      await batch.commit();
+      alert(`✅ ${contador} lançamento(s) de cartão foram atualizados para o mês de vencimento correto!`);
+    } else {
+      alert('✅ Todas as faturas já estão sincronizadas com o ciclo correto!');
+    }
+  };
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
@@ -685,6 +738,7 @@ export default function App() {
         grupo_id: parcelasTotal > 1 ? grupoId : null,
         fatura_paga: false,
         pago: isCredito ? true : statusPago, 
+        data_compra: hojeIso,
         data_vencimento: dataVencItem,
         anoMes: anoMesItem,
         mensagem_original: `Lançamento manual parcelado`,
@@ -718,12 +772,14 @@ export default function App() {
     const { cartaoNome, tipoPagamento, bancoSaida } = modalPagarFatura;
 
     if (tipoPagamento === 'TOTAL' || valorPagarNum >= modalPagarFatura.valorFatura) {
-      const comprasDaFatura = transacoes.filter(
+      const comprasDaFatura = transacoesComCicloCorrigido.filter(
         t => t.anoMes === filtroMesAno && t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cartaoNome.toLowerCase() && !t.fatura_paga
       );
       for (const item of comprasDaFatura) {
         await updateDoc(doc(db, 'users', user.uid, 'transacoes', item.id), {
-          fatura_paga: true
+          fatura_paga: true,
+          anoMes: item.anoMes,
+          data_vencimento: item.data_vencimento
         });
       }
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
@@ -810,13 +866,15 @@ export default function App() {
       });
       await batch.commit();
     } else {
+      const dataVencNova = transacaoEditando.data_vencimento || hojeIso;
       await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacaoEditando.id), {
         descricao: transacaoEditando.descricao,
         valor: Number(transacaoEditando.valor),
         categoria: transacaoEditando.categoria,
         subcategoria: transacaoEditando.subcategoria || 'Geral',
         metodo: transacaoEditando.metodo,
-        data_vencimento: transacaoEditando.data_vencimento || hojeIso,
+        data_vencimento: dataVencNova,
+        anoMes: dataVencNova.slice(0, 7),
         pago: Boolean(transacaoEditando.pago),
         banco_nome: transacaoEditando.banco_nome || null,
         cartao_nome: transacaoEditando.metodo === 'CREDITO' ? transacaoEditando.cartao_nome : null
@@ -948,8 +1006,8 @@ export default function App() {
 
     for (const c of cartoes) {
       const nCartao = c.nome.toLowerCase();
-      // Verificação mais flexível para reconhecer partes do nome do cartão (ex: "Infiniti")
-      if (txtLower.includes(nCartao) || nCartao.includes(txtLower.split(/\s+/).find(w => nCartao.includes(w)) || 'xpto')) {
+      const partesNomeCartao = nCartao.split(/\s+/).filter(p => p.length >= 2);
+      if (txtLower.includes(nCartao) || partesNomeCartao.some(parte => txtLower.includes(parte))) {
         cartaoIdentificado = c.nome;
         metodo = 'CREDITO';
         break;
@@ -1007,8 +1065,9 @@ export default function App() {
       categoria: classif.categoria,
       subcategoria: classif.subcategoria,
       precisaPerguntarCategoria: !classif.reconhecida,
-      precisaPerguntarData: (parcelasTotal > 1 || isAgendado) && !infoVenc && metodo !== 'CREDITO',
+      precisaPerguntarData: Boolean(metodo && metodo !== 'CREDITO' && (parcelasTotal > 1 || isAgendado) && !infoVenc),
       pago: !isAgendado,
+      data_compra: hojeIso,
       data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeIso,
       anoMes: infoVenc ? infoVenc.anoMes : filtroMesAno
     };
@@ -1043,7 +1102,7 @@ export default function App() {
         let dataVencItem = dados.data_vencimento || hojeIso;
 
         if (isCredito) {
-           const fatura = calcularDataFaturaCartao(dados.data_vencimento || hojeIso, diaFech, diaVenc, i + 1);
+           const fatura = calcularDataFaturaCartao(dados.data_compra || hojeIso, diaFech, diaVenc, i + 1);
            anoMesItem = fatura.anoMes;
            dataVencItem = fatura.dataVencimento;
         } else if (pTotal > 1) {
@@ -1071,6 +1130,7 @@ export default function App() {
           grupo_id: pTotal > 1 ? grupoId : null,
           fatura_paga: false,
           pago: statusPago,
+          data_compra: dados.data_compra || hojeIso,
           data_vencimento: dataVencItem,
           anoMes: anoMesItem,
           mensagem_original: textoOriginal,
@@ -1101,7 +1161,7 @@ export default function App() {
       const faltaMetodo = !item.metodo && item.pago !== false;
       const faltaBanco = (item.metodo === 'PIX' || item.metodo === 'DEBITO') && !item.banco_nome && item.pago !== false;
       const faltaCat = !item.categoria || item.precisaPerguntarCategoria;
-      const faltaData = item.precisaPerguntarData;
+      const faltaData = item.precisaPerguntarData && item.metodo !== 'CREDITO';
 
       if (!faltaMetodo && !faltaBanco && !faltaCat && !faltaData) prontos.push(item);
       else pendentes.push(item);
@@ -1117,12 +1177,13 @@ export default function App() {
       const prim = pendentes[0];
       const listaStr = pendentes.map(i => `• *${i.descricao}* — R$ ${i.valorTotal.toFixed(2)}`).join('\n');
 
-      if (prim.precisaPerguntarData) {
-        setPendenteSimulador({ etapa: 'DATA', itens: pendentes, textoOriginal });
-        msgs.push(`📅 *Qual a data do primeiro vencimento?*\n${listaStr}\n\nResponda com o dia (ex: *dia 20*) ou a data (ex: *20/11*).`);
-      } else if (!prim.metodo && prim.pago !== false) {
+      // PRIORIDADE CORRIGIDA: Pergunta sempre o método ANTES de perguntar a data
+      if (!prim.metodo && prim.pago !== false) {
         setPendenteSimulador({ etapa: 'METODO', itens: pendentes, textoOriginal });
         msgs.push(`❓ *Qual foi a forma de pagamento?*\n${listaStr}\n\nResponda com: *Pix*, *Débito*, *Dinheiro* ou o cartão (*${cartoes.map(c => c.nome).join(', ')}*).`);
+      } else if (prim.precisaPerguntarData && prim.metodo !== 'CREDITO') {
+        setPendenteSimulador({ etapa: 'DATA', itens: pendentes, textoOriginal });
+        msgs.push(`📅 *Qual a data do primeiro vencimento?*\n${listaStr}\n\nResponda com o dia (ex: *dia 20*) ou a data (ex: *20/11*).`);
       } else if ((prim.metodo === 'PIX' || prim.metodo === 'DEBITO') && !prim.banco_nome && prim.pago !== false) {
         setPendenteSimulador({ etapa: 'BANCO', itens: pendentes, textoOriginal });
         msgs.push(`🏦 *De qual conta bancária vai sair esse ${prim.metodo}?*\n${listaStr}\n\nResponda com: *${bancos.map(b => b.nome).join(' ou ')}*.`);
@@ -1180,7 +1241,12 @@ export default function App() {
 
           for (const c of cartoes) {
             const nCartao = c.nome.toLowerCase();
-            if (txtLower.includes(nCartao) || nCartao.includes(txtLower)) { metodoResp = 'CREDITO'; cartaoResp = c.nome; break; }
+            const partes = nCartao.split(/\s+/).filter(p => p.length >= 2);
+            if (txtLower.includes(nCartao) || partes.some(p => txtLower.includes(p))) {
+              metodoResp = 'CREDITO';
+              cartaoResp = c.nome;
+              break;
+            }
           }
           for (const b of bancos) {
             const nBanco = b.nome.toLowerCase();
@@ -1203,6 +1269,7 @@ export default function App() {
               metodo: metodoResp,
               cartao_nome: cartaoResp,
               banco_nome: bancoResp || it.banco_nome,
+              precisaPerguntarData: metodoResp === 'CREDITO' ? false : (it.parcelasTotal > 1),
               pago: true
             }));
             await verificarPendenciasSimulador(atualizados, pendenteSimulador.textoOriginal);
@@ -1254,7 +1321,7 @@ export default function App() {
       if (/proxima|proximas|5 dias/i.test(txtLower) && /conta|vencimento|vencer/i.test(txtLower)) {
         const hojeZero = new Date(hojeIso + 'T00:00:00');
         const limite5 = new Date(hojeZero.getTime() + 5 * 24 * 60 * 60 * 1000);
-        const prox = transacoes.filter(t => {
+        const prox = transacoesComCicloCorrigido.filter(t => {
           if (t.pago !== false || !t.data_vencimento) return false;
           const dt = new Date(t.data_vencimento + 'T00:00:00');
           return dt <= limite5;
@@ -1271,7 +1338,7 @@ export default function App() {
       }
 
       if (/contas a vencer|contas em aberto|o que vence/i.test(txtLower)) {
-        const abertas = transacoes.filter(t => t.anoMes === filtroMesAno && t.pago === false);
+        const abertas = transacoesComCicloCorrigido.filter(t => t.anoMes === filtroMesAno && t.pago === false);
         if (abertas.length === 0) {
           setHistoricoChat(prev => [...prev, { autor: 'bot', texto: `📅 *Contas a Vencer (${filtroMesAno})*\n\n✅ Nenhuma conta em aberto neste mês!` }]);
         } else {
@@ -1424,9 +1491,18 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS GERAIS E DADOS DO GRÁFICO (COM DRILL-DOWN)
+  // CÁLCULOS GERAIS COM RECÁLCULO DINÂMICO DE CICLO DE FATURA
   // ==========================================================================
-  const transacoesFiltradas = transacoes.filter(t => t.anoMes === filtroMesAno);
+  const transacoesComCicloCorrigido = transacoes.map(t => {
+    const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
+    return {
+      ...t,
+      anoMes: ciclo.anoMes,
+      data_vencimento: ciclo.data_vencimento
+    };
+  });
+
+  const transacoesFiltradas = transacoesComCicloCorrigido.filter(t => t.anoMes === filtroMesAno);
   
   const totalReceitas = transacoesFiltradas
     .filter(t => t.tipo === 'RECEITA' && t.pago !== false && t.metodo !== 'TRANSFERENCIA')
@@ -1447,11 +1523,11 @@ export default function App() {
   const projecaoSaldoFimMes = totalReceitas - projecaoDespesasMes;
 
   const saldosPorBanco = bancos.map((b, index) => {
-    const entradasBanco = transacoes
+    const entradasBanco = transacoesComCicloCorrigido
       .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
-    const saidasBanco = transacoes
+    const saidasBanco = transacoesComCicloCorrigido
       .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO' && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
@@ -1472,7 +1548,7 @@ export default function App() {
       .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga)
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
-    const comprometidoTotal = transacoes
+    const comprometidoTotal = transacoesComCicloCorrigido
       .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
@@ -1499,7 +1575,7 @@ export default function App() {
       const diaVencStr = String(c.diaVencimento || 12).padStart(2, '0');
       return {
         id: `fatura-${c.id}-${filtroMesAno}`,
-        descricao: `Fatura Consolidada Cartão ${c.nome} (Em Aberto no Vencimento)`,
+        descricao: `Fatura Consolidada Cartão ${c.nome} (Venc. ${diaVencStr}/${filtroMesAno.split('-')[1]})`,
         valor: c.faturaMes,
         tipo: 'FATURA_CARTAO',
         metodo: 'FATURA DO MÊS',
@@ -1725,7 +1801,6 @@ export default function App() {
               </button>
             </div>
             
-            {/* CHECKBOX: APLICAR EM PARCELAS FUTURAS */}
             {transacaoEditando.grupo_id && (
               <div className="flex items-center gap-3 mt-2 p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl">
                 <input 
@@ -2198,7 +2273,7 @@ export default function App() {
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas a Vencer ({filtroMesAno})</span>
                     <p className="text-lg font-bold text-amber-400 mt-1">
                       R$ {(
-                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0) +
+                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA' && t.metodo !== 'CREDITO').reduce((a, b) => a + Number(b.valor || 0), 0) +
                         faturasConsolidadasNoExtrato.reduce((a, b) => a + Number(b.valor || 0), 0)
                       ).toFixed(2)}
                     </p>
@@ -2422,7 +2497,7 @@ export default function App() {
                             )}
                           </p>
                           <p className="text-xs text-slate-400 mt-0.5">
-                            Data: <strong>{formatarDataBR(item.data_vencimento)}</strong> • <span className="text-emerald-400 font-medium">{item.categoria} &gt; {item.subcategoria || 'Geral'}</span> • <span className="text-slate-300">{item.cartao_nome ? `Cartão ${item.cartao_nome}` : `${item.metodo} (${item.banco_nome || 'Geral'})`}</span>
+                            Vencimento/Fatura: <strong>{formatarDataBR(item.data_vencimento)}</strong> • <span className="text-emerald-400 font-medium">{item.categoria} &gt; {item.subcategoria || 'Geral'}</span> • <span className="text-slate-300">{item.cartao_nome ? `Cartão ${item.cartao_nome}` : `${item.metodo} (${item.banco_nome || 'Geral'})`}</span>
                           </p>
                         </div>
                       </div>
@@ -2464,12 +2539,20 @@ export default function App() {
                       Pelo WhatsApp envie: <em>"Água vence 25/10 valor 80,00"</em> ou dê baixa enviando <em>"paguei a água no pix Itaú"</em>.
                     </p>
                   </div>
-                  <button 
-                    onClick={dispararTesteAlertaWhatsApp}
-                    className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
-                  >
-                    <BellRing className="w-3.5 h-3.5" /> Testar Alerta
-                  </button>
+                  <div className="flex gap-2 flex-wrap">
+                    <button 
+                      onClick={recalcularFaturasBanco}
+                      className="bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/30 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Corrigir Faturas no Banco
+                    </button>
+                    <button 
+                      onClick={dispararTesteAlertaWhatsApp}
+                      className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
+                    >
+                      <BellRing className="w-3.5 h-3.5" /> Testar Alerta
+                    </button>
+                  </div>
                 </div>
 
                 <form onSubmit={lancarContaAgendada} className="grid grid-cols-1 sm:grid-cols-6 gap-3">
