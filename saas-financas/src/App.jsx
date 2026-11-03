@@ -75,32 +75,25 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   return { categoria: null, subcategoria: null, reconhecida: false };
 };
 
-// CORREÇÃO: Matemática Robusta de Avanço de Fatura com Fuso Horário Local
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
   const dFech = Number(diaFechamento) || 5;
   const dVenc = Number(diaVencimento) || 12;
 
-  // Garante que a data é lida localmente sem saltos de fuso horário
   const [anoStr, mesStr, diaStr] = dataCompraIso.split('T')[0].split('-');
   let anoFatura = Number(anoStr);
-  let mesFatura = Number(mesStr) - 1; // 0-indexado
+  let mesFatura = Number(mesStr) - 1; 
   const diaCompra = Number(diaStr);
 
-  // Se o dia da compra for igual ou maior que o fechamento, joga para o mês seguinte
   if (diaCompra >= dFech) {
     mesFatura += 1;
   }
   
-  // Se o vencimento do cartão for num dia anterior ao fechamento (ex: fecha 25, vence dia 5),
-  // a fatura de quem comprou dia 26 tem de vencer APENAS no mês seguinte ao próximo
   if (dVenc < dFech) {
     mesFatura += 1;
   }
   
-  // Avança os meses se for compra parcelada
   mesFatura += (parcelaAtual - 1);
 
-  // Ajusta o ano se a fatura pular para o próximo ano
   const dataVenc = new Date(anoFatura, mesFatura, dVenc);
   const anoRes = dataVenc.getFullYear();
   const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
@@ -227,7 +220,7 @@ export default function App() {
   const [historicoChat, setHistoricoChat] = useState([
     { 
       autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ O sistema avança o mês no Cartão de Crédito inteligente.\n2️⃣ O Extrato agora mostra claramente o Mês da Fatura!\n3️⃣ "Exportar Excel" a funcionar 100%!\n\nEnvie "teste" para checar a conexão.' 
+      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ Prioridade de Cartão corrigida: nunca peço o dia se já souber a forma de pagamento.\n2️⃣ O Extrato agora mostra claramente o Mês da Fatura!\n3️⃣ "Exportar Excel" a funcionar 100%!\n\nEnvie "teste" para checar a conexão.' 
     }
   ]);
   const [processando, setProcessando] = useState(false);
@@ -306,7 +299,6 @@ export default function App() {
         let anoMes = dataDoc.anoMes;
         let dataIso = dataDoc.data_vencimento;
         
-        // CORREÇÃO: Garante que as transações fiquem com a data e anoMes consistentes
         if (!anoMes && dataDoc.criadoEm) {
           const d = dataDoc.criadoEm.toDate ? dataDoc.criadoEm.toDate() : new Date();
           anoMes = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -456,7 +448,6 @@ export default function App() {
     setFormTransferencia({ ...formTransferencia, valor: '' });
     alert(`🔄 Transferência de R$ ${valorNum.toFixed(2)} de ${formTransferencia.bancoOrigem} para ${formTransferencia.bancoDestino} registrada!`);
   };
-
   const salvarCartao = async (e) => {
     e.preventDefault();
     if (!cartaoForm.nome.trim() || !user) return;
@@ -530,6 +521,7 @@ export default function App() {
     setBancos(novaLista);
     await setDoc(doc(db, 'users', user.uid), { bancos: novaLista }, { merge: true });
   };
+
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
     if (!formAgendamento.descricao || !formAgendamento.valor || !user) return;
@@ -623,6 +615,7 @@ export default function App() {
     });
   };
 
+  // Lógica Flexível de Lançamento (Cartão, PIX, Dinheiro, Carnê)
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
     if (!novaCompraCartao.descricao || !novaCompraCartao.valorTotal || !user) return;
@@ -2180,7 +2173,7 @@ export default function App() {
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas a Vencer ({filtroMesAno})</span>
                     <p className="text-lg font-bold text-amber-400 mt-1">
                       R$ {(
-                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0) +
+                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA' && t.metodo !== 'CREDITO').reduce((a, b) => a + Number(b.valor || 0), 0) +
                         faturasConsolidadasNoExtrato.reduce((a, b) => a + Number(b.valor || 0), 0)
                       ).toFixed(2)}
                     </p>
