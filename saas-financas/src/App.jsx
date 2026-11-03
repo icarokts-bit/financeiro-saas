@@ -75,33 +75,57 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMa
   return { categoria: null, subcategoria: null, reconhecida: false };
 };
 
+// CORREÇÃO DEFINITIVA: Lógica de Fatura de Cartão de Crédito
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
   const dFech = Number(diaFechamento) || 5;
   const dVenc = Number(diaVencimento) || 12;
 
+  // Analisa a data da compra mantendo o fuso horário local
   const [anoStr, mesStr, diaStr] = dataCompraIso.split('T')[0].split('-');
-  let anoFatura = Number(anoStr);
-  let mesFatura = Number(mesStr) - 1; 
+  let anoCompra = Number(anoStr);
+  let mesCompra = Number(mesStr) - 1; // 0 a 11 (Janeiro a Dezembro)
   const diaCompra = Number(diaStr);
 
+  let mesFatura = mesCompra;
+  let anoFatura = anoCompra;
+
+  // Se a compra foi feita NO DIA ou DEPOIS do fechamento, 
+  // ela cai na fatura do próximo ciclo.
   if (diaCompra >= dFech) {
     mesFatura += 1;
   }
-  
-  if (dVenc < dFech) {
-    mesFatura += 1;
-  }
-  
+
+  // Avança os meses consoante a parcela atual (ex: parcela 2 avança +1 mês)
   mesFatura += (parcelaAtual - 1);
 
+  // Ajusta o ano se a fatura saltar para o ano seguinte
+  while (mesFatura > 11) {
+    mesFatura -= 12;
+    anoFatura += 1;
+  }
+
+  // Cria a data de vencimento final
   const dataVenc = new Date(anoFatura, mesFatura, dVenc);
-  const anoRes = dataVenc.getFullYear();
-  const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
+  
+  // No JavaScript, se o dia de vencimento for MENOR que o dia de fechamento 
+  // (ex: fecha dia 25, vence dia 5), a fatura vence no mês SEGUINTE ao fechamento.
+  let mesFinal = dataVenc.getMonth();
+  let anoFinal = dataVenc.getFullYear();
+  
+  if (dVenc < dFech) {
+     mesFinal += 1;
+     if (mesFinal > 11) {
+         mesFinal = 0;
+         anoFinal += 1;
+     }
+  }
+
+  const mesRes = String(mesFinal + 1).padStart(2, '0');
   const diaRes = String(dVenc).padStart(2, '0');
 
   return { 
-    anoMes: `${anoRes}-${mesRes}`, 
-    dataVencimento: `${anoRes}-${mesRes}-${diaRes}` 
+    anoMes: `${anoFinal}-${mesRes}`, 
+    dataVencimento: `${anoFinal}-${mesRes}-${diaRes}` 
   };
 };
 
@@ -448,6 +472,7 @@ export default function App() {
     setFormTransferencia({ ...formTransferencia, valor: '' });
     alert(`🔄 Transferência de R$ ${valorNum.toFixed(2)} de ${formTransferencia.bancoOrigem} para ${formTransferencia.bancoDestino} registrada!`);
   };
+
   const salvarCartao = async (e) => {
     e.preventDefault();
     if (!cartaoForm.nome.trim() || !user) return;
@@ -521,7 +546,6 @@ export default function App() {
     setBancos(novaLista);
     await setDoc(doc(db, 'users', user.uid), { bancos: novaLista }, { merge: true });
   };
-
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
     if (!formAgendamento.descricao || !formAgendamento.valor || !user) return;
@@ -924,7 +948,8 @@ export default function App() {
 
     for (const c of cartoes) {
       const nCartao = c.nome.toLowerCase();
-      if (txtLower.includes(nCartao) || nCartao.includes(txtLower)) {
+      // Verificação mais flexível para reconhecer partes do nome do cartão (ex: "Infiniti")
+      if (txtLower.includes(nCartao) || nCartao.includes(txtLower.split(/\s+/).find(w => nCartao.includes(w)) || 'xpto')) {
         cartaoIdentificado = c.nome;
         metodo = 'CREDITO';
         break;
@@ -962,7 +987,7 @@ export default function App() {
     let descricao = textoSemParcela
       .replace(/fui no|fui na|comprei|gastei|paguei|recebi|ganhei|vence|vencimento|valor|dia|no cartão de credito|no cartão|no credito|no pix|no débito|no debito|credito|crédito|debito|débito|pix|dinheiro|reais|r\$|de |em |cart[ãa]o\s+[a-z]+/gi, ' ')
       .replace(matchValor[0], '')
-      .replace(cartaoIdentificado ? new RegExp(cartaoIdentificado, 'gi') : '', '')
+      .replace(cartaoIdentificado ? new RegExp(cartaoIdentificado.split(' ')[0], 'gi') : '', '')
       .replace(bancoIdentificado ? new RegExp(bancoIdentificado, 'gi') : '', '')
       .replace(/\s+/g, ' ')
       .trim();
@@ -2173,7 +2198,7 @@ export default function App() {
                     <span className="text-[11px] text-slate-400 uppercase font-semibold">Contas a Vencer ({filtroMesAno})</span>
                     <p className="text-lg font-bold text-amber-400 mt-1">
                       R$ {(
-                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA' && t.metodo !== 'CREDITO').reduce((a, b) => a + Number(b.valor || 0), 0) +
+                        transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA').reduce((a, b) => a + Number(b.valor || 0), 0) +
                         faturasConsolidadasNoExtrato.reduce((a, b) => a + Number(b.valor || 0), 0)
                       ).toFixed(2)}
                     </p>
