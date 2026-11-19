@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
 import admin from 'firebase-admin';
@@ -24,8 +24,8 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 const db = admin.firestore();
 const app = express();
 
-// Diretório persistente do Volume no Railway (Configure o Mount Path como /app/baileys_auth)
-const AUTH_BASE_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'baileys_auth');
+// Diretório persistente do Volume no Railway (lê automaticamente o Mount Path configurado)
+const AUTH_BASE_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'wwebjs_auth');
 if (!fs.existsSync(AUTH_BASE_DIR)) {
   fs.mkdirSync(AUTH_BASE_DIR, { recursive: true });
 }
@@ -168,9 +168,7 @@ app.post('/conectar', validarApiKey, async (req, res) => {
       sessions.delete(userId);
     }
 
-    // Limpa a pasta local antiga para gerar um novo QR Code limpo
     limparPastaSessaoLocal(userId);
-
     startWhatsAppForUser(userId);
     res.json({ ok: true, message: 'Gerando novo QR Code...' });
   } catch (err) {
@@ -194,7 +192,7 @@ app.post('/desconectar', validarApiKey, async (req, res) => {
   await db.collection('users').doc(userId).set({
     whatsapp_status: 'DISCONNECTED',
     whatsapp_qrcode: null
-  }, { merge: true });
+  }, { merge: true }).catch(() => {});
 
   res.json({ ok: true });
 });
@@ -219,7 +217,8 @@ async function startWhatsAppForUser(userId) {
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
-      browser: ['FinZap SaaS', 'Chrome', '1.0.0'],
+      browser: Browsers.macOS('Desktop'),
+      connectTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
       syncFullHistory: false,
       markOnlineOnConnect: false,
@@ -1178,7 +1177,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
 async function restaurarSessoesAtivas() {
   try {
-    // Só restaura sessões cuja pasta local realmente existe no Volume do Railway
     const usersSnap = await db.collection('users').where('whatsapp_status', '==', 'CONNECTED').get();
     usersSnap.forEach(doc => {
       const userAuthDir = path.join(AUTH_BASE_DIR, `session_${doc.id}`);
