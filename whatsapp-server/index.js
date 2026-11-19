@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
-import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, initAuthCreds, BufferJSON } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
 import admin from 'firebase-admin';
+import fs from 'fs';
+import path from 'path';
 
 // ============================================================================
 // 1. INICIALIZAÇÃO DO FIREBASE E EXPRESS
@@ -21,6 +23,12 @@ if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 const db = admin.firestore();
 const app = express();
+
+// Diretório persistente do Volume no Railway (Configure o Mount Path como /app/baileys_auth)
+const AUTH_BASE_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(process.cwd(), 'baileys_auth');
+if (!fs.existsSync(AUTH_BASE_DIR)) {
+  fs.mkdirSync(AUTH_BASE_DIR, { recursive: true });
+}
 
 // Middleware de Segurança (API Key)
 const validarApiKey = (req, res, next) => {
@@ -47,6 +55,14 @@ const formatarDataBR = (isoDate) => {
   const [a, m, d] = isoDate.split('-');
   return `${d}/${m}/${a}`;
 };
+
+// Função para limpar a pasta local de sessão de um usuário
+function limparPastaSessaoLocal(userId) {
+  const userAuthDir = path.join(AUTH_BASE_DIR, `session_${userId}`);
+  if (fs.existsSync(userAuthDir)) {
+    fs.rmSync(userAuthDir, { recursive: true, force: true });
+  }
+}
 
 // Função matemática avançada para calcular o mês/dia correto da Fatura do Cartão
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
@@ -152,13 +168,8 @@ app.post('/conectar', validarApiKey, async (req, res) => {
       sessions.delete(userId);
     }
 
-    const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
-    const docs = await sessionRef.get();
-    if (!docs.empty) {
-      const batch = db.batch();
-      docs.forEach(d => batch.delete(d.ref));
-      await batch.commit();
-    }
+    // Limpa a pasta local antiga para gerar um novo QR Code limpo
+    limparPastaSessaoLocal(userId);
 
     startWhatsAppForUser(userId);
     res.json({ ok: true, message: 'Gerando novo QR Code...' });
@@ -178,13 +189,7 @@ app.post('/desconectar', validarApiKey, async (req, res) => {
     sessions.delete(userId);
   }
 
-  const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
-  const docs = await sessionRef.get();
-  if (!docs.empty) {
-    const batch = db.batch();
-    docs.forEach(d => batch.delete(d.ref));
-    await batch.commit();
-  }
+  limparPastaSessaoLocal(userId);
 
   await db.collection('users').doc(userId).set({
     whatsapp_status: 'DISCONNECTED',
@@ -195,102 +200,18 @@ app.post('/desconectar', validarApiKey, async (req, res) => {
 });
 
 // ============================================================================
-// 2. ADAPTADOR DE AUTENTICAÇÃO COM CACHE EM MEMÓRIA
-// ============================================================================
-async function useFirestoreAuthState(userId) {
-  const sessionRef = db.collection('users').doc(userId).collection('whatsapp_session');
-  const fixId = (id) => id.replace(/\//g, '__').replace(/\./g, '_');
-  const localCache = new Map();
-
-  try {
-    const allDocs = await sessionRef.get();
-    allDocs.forEach(doc => {
-      const payload = doc.data()?.payload;
-      if (payload) {
-        try {
-          localCache.set(doc.id, JSON.parse(payload, BufferJSON.reviver));
-        } catch (e) {}
-      }
-    });
-  } catch (err) {
-    console.error('Erro ao pré-carregar sessão do Firestore:', err);
-  }
-
-  const writeData = async (data, id) => {
-    const fixed = fixId(id);
-    localCache.set(fixed, data);
-    try {
-      const jsonString = JSON.stringify(data, BufferJSON.replacer);
-      await sessionRef.doc(fixed).set({ payload: jsonString });
-    } catch (err) {
-      console.error('Erro ao salvar chave no Firestore:', err);
-    }
-  };
-
-  const readData = async (id) => {
-    const fixed = fixId(id);
-    if (localCache.has(fixed)) return localCache.get(fixed);
-    try {
-      const docSnap = await sessionRef.doc(fixed).get();
-      if (!docSnap.exists) return null;
-      const { payload } = docSnap.data();
-      if (!payload) return null;
-      const parsed = JSON.parse(payload, BufferJSON.reviver);
-      localCache.set(fixed, parsed);
-      return parsed;
-    } catch (error) {
-      return null;
-    }
-  };
-
-  const removeData = async (id) => {
-    const fixed = fixId(id);
-    localCache.delete(fixed);
-    try {
-      await sessionRef.doc(fixed).delete();
-    } catch (error) {}
-  };
-
-  const creds = (await readData('creds')) || initAuthCreds();
-
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const data = {};
-          await Promise.all(
-            ids.map(async (id) => {
-              let value = await readData(`${type}-${id}`);
-              data[id] = value;
-            })
-          );
-          return data;
-        },
-        set: async (data) => {
-          const tasks = [];
-          for (const category of Object.keys(data)) {
-            for (const id of Object.keys(data[category])) {
-              const value = data[category][id];
-              const key = `${category}-${id}`;
-              tasks.push(value ? writeData(value, key) : removeData(key));
-            }
-          }
-          await Promise.all(tasks);
-        }
-      }
-    },
-    saveCreds: () => writeData(creds, 'creds')
-  };
-}
-
-// ============================================================================
-// 3. INICIALIZAÇÃO DO SOCKET DO WHATSAPP
+// 2. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM VOLUME LOCAL - ZERO FIRESTORE)
 // ============================================================================
 async function startWhatsAppForUser(userId) {
   try {
-    console.log(`⚡ A iniciar instância WhatsApp para userId: ${userId}`);
-    const { state, saveCreds } = await useFirestoreAuthState(userId);
+    console.log(`⚡ A iniciar instância WhatsApp (Volume Local) para userId: ${userId}`);
+    
+    const userAuthDir = path.join(AUTH_BASE_DIR, `session_${userId}`);
+    if (!fs.existsSync(userAuthDir)) {
+      fs.mkdirSync(userAuthDir, { recursive: true });
+    }
+
+    const { state, saveCreds } = await useMultiFileAuthState(userAuthDir);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
@@ -322,7 +243,7 @@ async function startWhatsAppForUser(userId) {
         await userRef.set({
           whatsapp_status: 'WAITING_QR',
           whatsapp_qrcode: qrBase64
-        }, { merge: true });
+        }, { merge: true }).catch(() => {});
       }
 
       if (connection === 'open') {
@@ -333,20 +254,25 @@ async function startWhatsAppForUser(userId) {
           whatsapp_status: 'CONNECTED',
           whatsapp_qrcode: null,
           whatsapp_jid: meJid
-        }, { merge: true });
+        }, { merge: true }).catch(() => {});
         console.log(`✅ WhatsApp CONECTADO para: ${userId} (${meJid})`);
       }
 
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        if (statusCode !== DisconnectReason.loggedOut) {
-          setTimeout(() => startWhatsAppForUser(userId), 4000);
+        const foiDeslogado = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+
+        if (!foiDeslogado) {
+          console.log(`🔄 Reconectando WhatsApp de ${userId} em 5s (Código: ${statusCode})...`);
+          setTimeout(() => startWhatsAppForUser(userId), 5000);
         } else {
+          console.log(`🛑 Sessão encerrada/deslogada para ${userId}. Limpando arquivos.`);
+          limparPastaSessaoLocal(userId);
+          sessions.delete(userId);
           await userRef.set({
             whatsapp_status: 'DISCONNECTED',
             whatsapp_qrcode: null
-          }, { merge: true });
-          sessions.delete(userId);
+          }, { merge: true }).catch(() => {});
         }
       }
     });
@@ -404,12 +330,12 @@ async function startWhatsAppForUser(userId) {
     });
 
   } catch (err) {
-    console.error('❌ Erro ao iniciar WhatsApp com Firestore:', err);
+    console.error('❌ Erro ao iniciar WhatsApp:', err);
   }
 }
 
 // ============================================================================
-// 4. ALERTA AUTOMÁTICO NO WHATSAPP
+// 3. ALERTA AUTOMÁTICO NO WHATSAPP
 // ============================================================================
 async function verificarAlertasVencimento(forcarDisparoManual = false) {
   try {
@@ -498,7 +424,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 setInterval(() => verificarAlertasVencimento(false), 30 * 60 * 1000);
 
 // ============================================================================
-// 5. EXTRAÇÃO INTELIGENTE DE DADOS
+// 4. EXTRAÇÃO INTELIGENTE DE DADOS
 // ============================================================================
 function extrairDataVencimento(texto) {
   const hoje = new Date();
@@ -624,7 +550,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
 }
 
 // ============================================================================
-// 6. GRAVAÇÃO NO FIRESTORE COM GRUPO DE PARCELAS E DATAS AVANÇADAS
+// 5. GRAVAÇÃO NO FIRESTORE COM GRUPO DE PARCELAS E DATAS AVANÇADAS
 // ============================================================================
 async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
   const hoje = new Date();
@@ -644,7 +570,6 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 
     await salvarRegraAprendida(userId, item.descricao, catFinal, subFinal);
 
-    // Lógica para dia de fechamento se for cartão
     const isCredito = item.metodo === 'CREDITO';
     const cartaoObj = isCredito ? cartoes.find(c => semAcento(c.nome) === semAcento(item.cartao_nome || '')) : null;
     const diaFech = cartaoObj ? (cartaoObj.diaFechamento || 5) : 5;
@@ -774,7 +699,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 }
 
 // ============================================================================
-// 7. FILA DE PENDÊNCIAS COM PERGUNTA DE DATA
+// 6. FILA DE PENDÊNCIAS COM PERGUNTA DE DATA
 // ============================================================================
 async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamentos, anoMesAtual, textoOriginal, sock, remoteJid) {
   const userRef = db.collection('users').doc(userId);
@@ -858,7 +783,7 @@ async function processarFilaDePendencias(userId, itens, cartoes, bancos, orcamen
 }
 
 // ============================================================================
-// 8. MOTOR DE INTELIGÊNCIA FINANCEIRA COMPLETO
+// 7. MOTOR DE INTELIGÊNCIA FINANCEIRA COMPLETO
 // ============================================================================
 async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJid) {
   try {
@@ -1030,7 +955,6 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
           return;
         }
-        setPendenteSimulador(null);
       }
     }
 
@@ -1254,12 +1178,23 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
 async function restaurarSessoesAtivas() {
   try {
+    // Só restaura sessões cuja pasta local realmente existe no Volume do Railway
     const usersSnap = await db.collection('users').where('whatsapp_status', '==', 'CONNECTED').get();
-    usersSnap.forEach(doc => startWhatsAppForUser(doc.id));
-  } catch (err) {}
+    usersSnap.forEach(doc => {
+      const userAuthDir = path.join(AUTH_BASE_DIR, `session_${doc.id}`);
+      if (fs.existsSync(userAuthDir)) {
+        startWhatsAppForUser(doc.id);
+      } else {
+        doc.ref.set({ whatsapp_status: 'DISCONNECTED', whatsapp_qrcode: null }, { merge: true }).catch(() => {});
+      }
+    });
+  } catch (err) {
+    console.error('Erro ao restaurar sessões ativas:', err);
+  }
 }
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
+  console.log(`🚀 Servidor rodando na porta ${PORT} | Auth Dir: ${AUTH_BASE_DIR}`);
   restaurarSessoesAtivas();
 });
