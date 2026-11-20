@@ -10,30 +10,16 @@ import {
 import { 
   PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer 
 } from 'recharts';
-import { initializeApp } from 'firebase/app';
 import { 
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, 
+  onAuthStateChanged, signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, signOut 
 } from 'firebase/auth';
 import { 
-  getFirestore, collection, doc, setDoc, addDoc, updateDoc, 
+  collection, doc, setDoc, addDoc, updateDoc, 
   deleteDoc, onSnapshot, query, where, orderBy, getDocs, 
   writeBatch, serverTimestamp 
 } from 'firebase/firestore';
-
-// Configuração do Firebase (substitua pelas suas credenciais se necessário)
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "SUA_API_KEY",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "SEU_AUTH_DOMAIN",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "SEU_PROJECT_ID",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "SEU_STORAGE_BUCKET",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "SEU_SENDER_ID",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "SEU_APP_ID"
-};
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
+import { db, auth } from './firebaseConfig';
 
 const RENDER_API_URL = import.meta.env.VITE_RENDER_API_URL || 'https://sua-api.onrender.com';
 const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'sua-chave-secreta';
