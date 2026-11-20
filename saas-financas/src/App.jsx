@@ -1,423 +1,339 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Wallet, TrendingUp, TrendingDown, CreditCard, MessageSquare, 
-  Plus, Trash2, QrCode, Send, LogOut, BarChart2, Calendar, 
-  FolderPlus, Target, AlertTriangle, Sparkles, CheckCircle2, 
-  Clock, Zap, BrainCircuit, RefreshCw, Landmark, 
-  Edit3, X, ShieldAlert, Search, FileText, BellRing, 
-  ArrowRightLeft, ChevronLeft, ChevronRight, Users
+  Wallet, TrendingUp, TrendingDown, CreditCard, Landmark, 
+  QrCode, MessageSquare, Send, Plus, Trash2, Edit3, X, 
+  BarChart2, FileText, Clock, FolderPlus, Users, LogOut, 
+  Sparkles, Calendar, ChevronLeft, ChevronRight, AlertTriangle, 
+  ShieldAlert, BrainCircuit, Target, Search, BellRing, 
+  CheckCircle2, Zap, ArrowRightLeft, RefreshCw 
 } from 'lucide-react';
-import { db, auth } from './firebaseConfig';
 import { 
-  collection, addDoc, onSnapshot, deleteDoc, updateDoc, doc, 
-  query, orderBy, serverTimestamp, setDoc, getDoc,
-  writeBatch, where, getDocs 
-} from 'firebase/firestore';
+  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer 
+} from 'recharts';
+import { initializeApp } from 'firebase/app';
 import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  signOut, 
-  onAuthStateChanged 
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, signOut 
 } from 'firebase/auth';
 import { 
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, 
-  PieChart, Pie, Cell 
-} from 'recharts';
+  getFirestore, collection, doc, setDoc, addDoc, updateDoc, 
+  deleteDoc, onSnapshot, query, where, orderBy, getDocs, 
+  writeBatch, serverTimestamp 
+} from 'firebase/firestore';
 
-const RENDER_API_URL = 'https://financeiro-saas-production-66cc.up.railway.app';
-const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'FinZapKey2026';
-const MASTER_EMAIL = 'icaro.kts@gmail.com'; 
+// Configuração do Firebase (substitua pelas suas credenciais se necessário)
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "SUA_API_KEY",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "SEU_AUTH_DOMAIN",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "SEU_PROJECT_ID",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "SEU_STORAGE_BUCKET",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "SEU_SENDER_ID",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "SEU_APP_ID"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+const RENDER_API_URL = import.meta.env.VITE_RENDER_API_URL || 'https://sua-api.onrender.com';
+const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'sua-chave-secreta';
+const MASTER_EMAIL = 'admin@finzap.com.br'; // Ajuste para o seu e-mail Master
+
+const CORES_GRAFICO = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+
+// ==========================================================================
+// FUNÇÕES AUXILIARES DE DATA E FATURA
+// ==========================================================================
 
 const formatarDataBR = (isoDate) => {
-  if (!isoDate || !isoDate.includes('-')) return isoDate || '-';
-  const [a, m, d] = isoDate.split('-');
-  return `${d}/${m}/${a}`;
+  if (!isoDate) return '--/--/----';
+  const partes = isoDate.split('T')[0].split('-');
+  if (partes.length !== 3) return isoDate;
+  return `${partes[2]}/${partes[1]}/${partes[0]}`;
 };
 
-const classificarCategoriaLocal = (texto, isReceita, categorias, subcategoriasMap) => {
-  const pLimpo = texto.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  if (isReceita) return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
+const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, numParcela = 1) => {
+  const [ano, mes, dia] = (dataCompraIso || new Date().toISOString().split('T')[0]).split('-').map(Number);
+  let mesFatura = mes - 1; // 0-indexed
+  let anoFatura = ano;
 
-  if (/mercado livre|shopee|amazon|shein|aliexpress|magalu|magazine|americanas/i.test(pLimpo)) {
-    return { categoria: 'Outros', subcategoria: 'Compras Online', reconhecida: true };
-  }
-  if (/mercado|supermercado|atacadao|compras|feira|acougue|hortifruti|maca|banana|fruta|verdura|legume|cebola|alho|tomate|batata|arroz|feijao|macarrao|carne|frango|ovo|leite|pao|queijo|sabao|detergente/i.test(pLimpo)) {
-    return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
-  }
-  if (/lanche|hamburguer|burger|pizza|restaurante|ifood|padaria|almoco|jantar|cafe|sorvete|acai|pastel|barzinho|cerveja|refrigerante|bolo|chocolate/i.test(pLimpo)) {
-    return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
-  }
-  if (/uber|99|taxi|onibus|estacionamento|pedagio/i.test(pLimpo)) {
-    return { categoria: 'Transporte', subcategoria: 'Apps / Pedágio', reconhecida: true };
-  }
-  if (/gasolina|etanol|diesel|combustivel|posto/i.test(pLimpo)) {
-    return { categoria: 'Transporte', subcategoria: 'Combustível', reconhecida: true };
-  }
-  if (/cinema|passeio|show|viagem|shopping|netflix|spotify|streaming/i.test(pLimpo)) {
-    return { categoria: 'Lazer', subcategoria: 'Passeios / Streaming', reconhecida: true };
-  }
-  if (/luz|energia|agua|gas|internet|telefone|aluguel|condominio|boleto|farmacia|remedio|medico/i.test(pLimpo)) {
-    return { categoria: 'Contas', subcategoria: 'Casa / Fixas', reconhecida: true };
-  }
-
-  for (const cat of categorias) {
-    const subs = subcategoriasMap[cat] || [];
-    for (const sub of subs) {
-      if (pLimpo.includes(sub.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())) {
-        return { categoria: cat, subcategoria: sub, reconhecida: true };
-      }
-    }
-    if (pLimpo.includes(cat.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())) {
-      return { categoria: cat, subcategoria: subs[0] || 'Geral', reconhecida: true };
-    }
-  }
-
-  return { categoria: null, subcategoria: null, reconhecida: false };
-};
-
-// Matemática Definitiva de Avanço de Fatura
-const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
-  const dFech = Number(diaFechamento) || 5;
-  const dVenc = Number(diaVencimento) || 12;
-
-  const [anoStr, mesStr, diaStr] = dataCompraIso.split('T')[0].split('-');
-  let anoCompra = Number(anoStr);
-  let mesCompra = Number(mesStr) - 1; 
-  const diaCompra = Number(diaStr);
-
-  let mesFatura = mesCompra;
-  let anoFatura = anoCompra;
-
-  // Se comprou no dia do fechamento ou depois (ex: comprou dia 30/10 e fecha dia 03 ou 04), avança para Novembro
-  if (diaCompra >= dFech) {
+  // Se comprou no dia do fechamento ou depois, vai para a próxima fatura
+  if (dia >= Number(diaFechamento)) {
     mesFatura += 1;
   }
 
-  // Se o dia de vencimento é menor que o fechamento, vence no mês seguinte
-  if (dVenc < dFech) {
+  // Se o dia de vencimento for menor que o fechamento, a fatura vence no mês seguinte ao fechamento
+  if (Number(diaVencimento) < Number(diaFechamento)) {
     mesFatura += 1;
   }
 
-  // Soma as parcelas seguintes
-  mesFatura += (parcelaAtual - 1);
+  // Soma o deslocamento da parcela (parcela 1 = +0 meses, parcela 2 = +1 mês, etc.)
+  mesFatura += (numParcela - 1);
 
-  const dataVenc = new Date(anoFatura, mesFatura, dVenc);
-  const anoFinal = dataVenc.getFullYear();
-  const mesRes = String(dataVenc.getMonth() + 1).padStart(2, '0');
-  const diaRes = String(dVenc).padStart(2, '0');
-
-  return { 
-    anoMes: `${anoFinal}-${mesRes}`, 
-    dataVencimento: `${anoFinal}-${mesRes}-${diaRes}` 
-  };
-};
-
-// Recalcula em tempo real o ciclo correto para compras já salvas no banco
-const obterCicloFaturaReal = (t, listaCartoes, mesPadrao) => {
-  if (t.metodo !== 'CREDITO' || !t.cartao_nome) {
-    return {
-      anoMes: t.anoMes || mesPadrao,
-      data_vencimento: t.data_vencimento || `${t.anoMes || mesPadrao}-10`
-    };
-  }
-
-  const cartaoObj = listaCartoes.find(c => c.nome?.toLowerCase() === t.cartao_nome?.toLowerCase());
-  if (!cartaoObj) {
-    return {
-      anoMes: t.anoMes || mesPadrao,
-      data_vencimento: t.data_vencimento || `${t.anoMes || mesPadrao}-10`
-    };
-  }
-
-  const diaFech = Number(cartaoObj.diaFechamento) || 5;
-  const diaVenc = Number(cartaoObj.diaVencimento) || 12;
-
-  let dataBaseCompra = null;
-  if (t.data_compra && t.data_compra.includes('-')) {
-    dataBaseCompra = t.data_compra;
-  } else if (t.criadoEm && t.criadoEm.toDate) {
-    const d = t.criadoEm.toDate();
-    dataBaseCompra = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  } else if (t.data_vencimento && t.data_vencimento.includes('-')) {
-    const diaSalvo = Number(t.data_vencimento.split('-')[2]);
-    if (diaSalvo !== diaVenc) {
-      dataBaseCompra = t.data_vencimento;
-    }
-  }
-
-  if (dataBaseCompra) {
-    return calcularDataFaturaCartao(dataBaseCompra, diaFech, diaVenc, t.parcela_atual || 1);
-  }
+  const dataVencObj = new Date(anoFatura, mesFatura, Number(diaVencimento));
+  const anoFinal = dataVencObj.getFullYear();
+  const mesFinal = String(dataVencObj.getMonth() + 1).padStart(2, '0');
+  const diaFinal = String(dataVencObj.getDate()).padStart(2, '0');
 
   return {
-    anoMes: t.anoMes || mesPadrao,
-    data_vencimento: `${t.anoMes || mesPadrao}-${String(diaVenc).padStart(2, '0')}`
+    anoMes: `${anoFinal}-${mesFinal}`,
+    dataVencimento: `${anoFinal}-${mesFinal}-${diaFinal}`
   };
 };
 
+const obterCicloFaturaReal = (transacao, cartoes, mesFallback) => {
+  if (transacao.metodo !== 'CREDITO' || !transacao.cartao_nome) {
+    return {
+      anoMes: transacao.anoMes || mesFallback,
+      data_vencimento: transacao.data_vencimento
+    };
+  }
+
+  const cartao = cartoes.find(c => c.nome.toLowerCase() === transacao.cartao_nome.toLowerCase());
+  if (!cartao || !transacao.data_compra) {
+    return {
+      anoMes: transacao.anoMes || mesFallback,
+      data_vencimento: transacao.data_vencimento
+    };
+  }
+
+  const parcelaAtual = Number(transacao.parcela_atual || 1);
+  const calc = calcularDataFaturaCartao(
+    transacao.data_compra,
+    cartao.diaFechamento || 5,
+    cartao.diaVencimento || 12,
+    parcelaAtual
+  );
+
+  return {
+    anoMes: calc.anoMes,
+    data_vencimento: calc.dataVencimento
+  };
+};
+
+const classificarCategoriaLocal = (texto, isReceita, categorias, subcategorias) => {
+  const txt = texto.toLowerCase();
+  if (isReceita) {
+    return { categoria: 'Receita', subcategoria: 'Entradas', reconhecida: true };
+  }
+
+  const regras = [
+    { palavras: ['mercado', 'supermercado', 'maçã', 'banana', 'arroz', 'feijão', 'carne', 'açougue', 'padaria', 'pão', 'leite', 'feira'], cat: 'Alimentação', sub: 'Mercado' },
+    { palavras: ['lanche', 'ifood', 'restaurante', 'pizza', 'hamburguer', 'sorvete', 'açaí', 'bar', 'cerveja', 'jantar', 'almoço'], cat: 'Alimentação', sub: 'Lazer' },
+    { palavras: ['uber', '99', 'gasolina', 'etanol', 'posto', 'combustível', 'estacionamento', 'pedágio', 'ônibus', 'metrô'], cat: 'Transporte', sub: 'Combustível / App' },
+    { palavras: ['energia', 'luz', 'água', 'internet', 'aluguel', 'condomínio', 'celular', 'vivo', 'claro', 'tim', 'fatura'], cat: 'Contas', sub: 'Residencial' },
+    { palavras: ['farmácia', 'remédio', 'médico', 'consulta', 'exame', 'dentista', 'hospital'], cat: 'Saúde', sub: 'Farmácia / Médico' },
+    { palavras: ['cinema', 'netflix', 'spotify', 'jogo', 'viagem', 'hotel', 'passeio'], cat: 'Lazer', sub: 'Entretenimento' }
+  ];
+
+  for (const r of regras) {
+    if (r.palavras.some(p => txt.includes(p))) {
+      const catExiste = categorias.includes(r.cat) ? r.cat : categorias[0] || 'Outros';
+      const subExiste = (subcategorias[catExiste] || []).includes(r.sub) ? r.sub : (subcategorias[catExiste]?.[0] || 'Geral');
+      return { categoria: catExiste, subcategoria: subExiste, reconhecida: true };
+    }
+  }
+
+  return { categoria: 'Outros', subcategoria: 'Geral', reconhecida: false };
+};
 export default function App() {
+  // ==========================================================================
+  // ESTADOS DE AUTENTICAÇÃO E ASSINATURA
+  // ==========================================================================
   const [user, setUser] = useState(null);
   const [carregandoAuth, setCarregandoAuth] = useState(true);
-  const isMaster = user?.email === MASTER_EMAIL;
-
   const [isLoginMode, setIsLoginMode] = useState(true);
   const [emailInput, setEmailInput] = useState('');
   const [senhaInput, setSenhaInput] = useState('');
   const [erroAuth, setErroAuth] = useState('');
-
   const [statusAssinatura, setStatusAssinatura] = useState('VERIFICANDO');
-  const [linkPagamentoAsaas, setLinkPagamentoAsaas] = useState(null);
+  const [linkPagamentoAsaas, setLinkPagamentoAsaas] = useState('');
   const [gerandoPix, setGerandoPix] = useState(false);
 
-  const [abaAtiva, setAbaAtiva] = useState('dashboard');
-  const [transacoes, setTransacoes] = useState([]);
+  const isMaster = user?.email === MASTER_EMAIL;
   const [clientesAdmin, setClientesAdmin] = useState([]);
 
-  const [cartoes, setCartoes] = useState([
-    { id: '1', nome: 'VISA', limite: 5000, diaFechamento: 5, diaVencimento: 12, banco: 'Itaú' },
-    { id: '2', nome: 'NUBANK', limite: 3500, diaFechamento: 10, diaVencimento: 17, banco: 'Nubank Conta' }
-  ]);
-
-  const [bancos, setBancos] = useState([
-    { id: 'b1', nome: 'Itaú', tipo: 'Conta Corrente / Débito', saldoInicial: 1500 },
-    { id: 'b2', nome: 'Nubank Conta', tipo: 'Conta Digital / Pix', saldoInicial: 800 }
-  ]);
-  
-  const [categorias, setCategorias] = useState(['Alimentação', 'Transporte', 'Lazer', 'Contas', 'Receita', 'Outros']);
-  const [subcategorias, setSubcategorias] = useState({
-    'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Padaria'],
-    'Transporte': ['Combustível', 'Apps / Pedágio', 'Manutenção'],
-    'Lazer': ['Passeios', 'Streaming', 'Viagens'],
-    'Contas': ['Casa / Fixas', 'Saúde / Farmácia', 'Fatura Cartão'],
-    'Receita': ['Salário', 'Vendas / Extras'],
-    'Outros': ['Geral']
-  });
-  const [orcamentos, setOrcamentos] = useState({});
-  const [contasFixas, setContasFixas] = useState([
-    { id: 'f1', nome: 'Energia Elétrica', valorPadrao: 180, diaVencimento: 15, categoria: 'Contas' },
-    { id: 'f2', nome: 'Internet Fibra', valorPadrao: 120, diaVencimento: 10, categoria: 'Contas' }
-  ]);
-
-  const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
-  const [whatsappQrCode, setWhatsappQrCode] = useState(null);
-  const [carregandoQr, setCarregandoQr] = useState(false);
-
+  // ==========================================================================
+  // ESTADOS DE DATAS E COMPETÊNCIA ATIVA
+  // ==========================================================================
   const dataAtualObj = new Date();
   const diaHoje = dataAtualObj.getDate();
-  const hojeIso = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}-${String(dataAtualObj.getDate()).padStart(2, '0')}`;
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
+  const hojeIso = `${mesAtualStr}-${String(diaHoje).padStart(2, '0')}`;
+
   const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
+  const [abaAtiva, setAbaAtiva] = useState('dashboard');
+
+  // ==========================================================================
+  // ESTADOS DE DADOS FINANCEIROS (FIRESTORE)
+  // ==========================================================================
+  const [transacoes, setTransacoes] = useState([]);
+  const [cartoes, setCartoes] = useState([]);
+  const [bancos, setBancos] = useState([]);
+  const [contasFixas, setContasFixas] = useState([]);
+  const [categorias, setCategorias] = useState(['Alimentação', 'Transporte', 'Contas', 'Saúde', 'Lazer', 'Outros', 'Receita']);
+  const [subcategorias, setSubcategorias] = useState({
+    Alimentação: ['Mercado', 'Lazer', 'Geral'],
+    Transporte: ['Combustível / App', 'Manutenção', 'Geral'],
+    Contas: ['Residencial', 'Fatura Cartão', 'Geral'],
+    Saúde: ['Farmácia / Médico', 'Geral'],
+    Lazer: ['Entretenimento', 'Geral'],
+    Outros: ['Geral'],
+    Receita: ['Entradas', 'Geral']
+  });
+  const [orcamentos, setOrcamentos] = useState({});
+
+  // ==========================================================================
+  // ESTADOS DE FORMULÁRIOS E MODAIS
+  // ==========================================================================
+  const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
+  const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
+  const [formTransferencia, setFormTransferencia] = useState({ bancoOrigem: '', bancoDestino: '', valor: '' });
+  const [formAgendamento, setFormAgendamento] = useState({ descricao: '', valor: '', data_vencimento: hojeIso, tipo: 'DESPESA', categoria: 'Contas', subcategoria: 'Residencial' });
+  const [novaCompraCartao, setNovaCompraCartao] = useState({ descricao: '', valorTotal: '', parcelas: '1', metodo: 'CREDITO', cartaoNome: '', bancoNome: '', categoria: 'Outros', subcategoria: 'Geral' });
+
+  const [fixaNome, setFixaNome] = useState('');
+  const [fixaValor, setFixaValor] = useState('');
+  const [fixaDia, setFixaDia] = useState('');
 
   const [novaCatNome, setNovaCatNome] = useState('');
   const [catSelecionadaParaSub, setCatSelecionadaParaSub] = useState('Alimentação');
   const [novaSubNome, setNovaSubNome] = useState('');
   const [orcamentoCat, setOrcamentoCat] = useState('');
   const [orcamentoValor, setOrcamentoValor] = useState('');
-  const [fixaNome, setFixaNome] = useState('');
-  const [fixaValor, setFixaValor] = useState('');
-  const [fixaDia, setFixaDia] = useState('');
 
-  const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
-  const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
-
-  const [formTransferencia, setFormTransferencia] = useState({
-    bancoOrigem: 'Itaú',
-    bancoDestino: 'Nubank Conta',
-    valor: '',
-    data: hojeIso
-  });
-
-  const [formAgendamento, setFormAgendamento] = useState({
-    descricao: '',
-    valor: '',
-    data_vencimento: hojeIso,
-    tipo: 'DESPESA',
-    categoria: 'Contas',
-    subcategoria: 'Casa / Fixas',
-    banco_nome: 'Itaú',
-    pago: false
-  });
-
-  const [filtroVencNome, setFiltroVencNome] = useState('');
-  const [filtroVencCat, setFiltroVencCat] = useState('TODAS');
-  const [filtroVencStatus, setFiltroVencStatus] = useState('ABERTO');
-  const [filtroVencData, setFiltroVencData] = useState('TODOS');
-
+  // Modais
   const [modalBaixaConta, setModalBaixaConta] = useState(null);
-  const [pesquisaExtrato, setPesquisaExtrato] = useState('');
-  const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
-  const [categoriaSelecionadaGrafico, setCategoriaSelecionadaGrafico] = useState(null);
-  const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
-  const [novaCompraCartao, setNovaCompraCartao] = useState({
-    descricao: '',
-    valorTotal: '',
-    parcelas: '1',
-    metodo: 'CREDITO', 
-    cartaoNome: 'VISA',
-    bancoNome: 'Itaú',
-    categoria: 'Alimentação',
-    subcategoria: 'Lazer'
-  });
-  
   const [modalPagarFatura, setModalPagarFatura] = useState(null);
   const [transacaoEditando, setTransacaoEditando] = useState(null);
   const [aplicarFuturasEdicao, setAplicarFuturasEdicao] = useState(false);
   const [transacaoExcluindo, setTransacaoExcluindo] = useState(null);
   const [aplicarFuturasExclusao, setAplicarFuturasExclusao] = useState(false);
 
+  // Filtros de Extrato, Vencimentos e Gráficos
+  const [pesquisaExtrato, setPesquisaExtrato] = useState('');
+  const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
+  const [filtroVencNome, setFiltroVencNome] = useState('');
+  const [filtroVencCat, setFiltroVencCat] = useState('TODAS');
+  const [filtroVencStatus, setFiltroVencStatus] = useState('TODOS');
+  const [filtroVencData, setFiltroVencData] = useState('TODOS');
+  const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
+  const [categoriaSelecionadaGrafico, setCategoriaSelecionadaGrafico] = useState(null);
+
+  // ==========================================================================
+  // ESTADOS DO WHATSAPP E SIMULADOR
+  // ==========================================================================
+  const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
+  const [whatsappQrCode, setWhatsappQrCode] = useState('');
+  const [carregandoQr, setCarregandoQr] = useState(false);
   const [msgWhats, setMsgWhats] = useState('');
+  const [processando, setProcessando] = useState(false);
   const [pendenteSimulador, setPendenteSimulador] = useState(null);
   const [historicoChat, setHistoricoChat] = useState([
-    { 
-      autor: 'bot', 
-      texto: '🤖 Olá! Sou seu Assistente Financeiro IA.\n\nNovidades integradas:\n1️⃣ Recálculo automático do ciclo de fatura para compras de Outubro -> Novembro.\n2️⃣ Botão para sincronizar faturas antigas no banco.\n3️⃣ "Exportar Excel" 100% operacional!\n\nEnvie "teste" para checar a conexão.' 
-    }
+    { autor: 'bot', texto: '👋 Olá! Sou o FinZap IA.\nEnvie um gasto como *"comprei lanche 35,00 no pix Itaú"* ou digite *"teste"*.' }
   ]);
-  const [processando, setProcessando] = useState(false);
 
-  const CORES_GRAFICO = ['#34d399', '#38bdf8', '#fbbf24', '#f472b6', '#a78bfa', '#2dd4bf', '#fb7185', '#60a5fa', '#94a3b8', '#c084fc'];
-
-  const alterarMesCompetencia = (delta) => {
-    const [ano, mes] = filtroMesAno.split('-').map(Number);
-    const novaData = new Date(ano, (mes - 1) + delta, 15);
-    const novoAno = novaData.getFullYear();
-    const novoMes = String(novaData.getMonth() + 1).padStart(2, '0');
-    setFiltroMesAno(`${novoAno}-${novoMes}`);
-  };
-
+  // ==========================================================================
+  // EFEITO 1: MONITORAMENTO DE AUTENTICAÇÃO
+  // ==========================================================================
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsub = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      if (currentUser) {
-        const userDocRef = doc(db, 'users', currentUser.uid);
-        const userSnap = await getDoc(userDocRef);
-        if (userSnap.exists()) {
-          const dados = userSnap.data();
-          setStatusAssinatura(dados.status_assinatura || 'INATIVO');
-          if (dados.categorias) setCategorias(dados.categorias);
-          if (dados.subcategorias) setSubcategorias(dados.subcategorias);
-          if (dados.orcamentos) setOrcamentos(dados.orcamentos);
-          if (dados.cartoes) setCartoes(dados.cartoes);
-          if (dados.bancos) setBancos(dados.bancos);
-          if (dados.contasFixas) setContasFixas(dados.contasFixas);
-          if (dados.whatsapp_status) setWhatsappStatus(dados.whatsapp_status);
-          if (dados.whatsapp_qrcode) setWhatsappQrCode(dados.whatsapp_qrcode);
-        } else {
-          setStatusAssinatura('INATIVO');
-          await setDoc(userDocRef, { 
-            categorias, 
-            subcategorias,
-            orcamentos: {}, 
-            cartoes, 
-            bancos,
-            contasFixas,
-            whatsapp_status: 'DISCONNECTED',
-            status_assinatura: 'INATIVO'
-          }, { merge: true });
-        }
-      }
       setCarregandoAuth(false);
     });
-    return () => unsubscribe();
+    return () => unsub();
   }, []);
 
+  // ==========================================================================
+  // EFEITO 2: LISTENERS DO FIRESTORE DO USUÁRIO LOGADO
+  // ==========================================================================
   useEffect(() => {
-    if (!user) {
-      setTransacoes([]);
-      return;
-    }
+    if (!user) return;
 
+    // 1. Documento principal do usuário (Assinatura, WhatsApp, Categorias, Orçamentos)
     const userDocRef = doc(db, 'users', user.uid);
-    const unsubUser = onSnapshot(userDocRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setStatusAssinatura(data.status_assinatura || 'INATIVO');
-        if (data.whatsapp_status) setWhatsappStatus(data.whatsapp_status);
-        if (data.whatsapp_qrcode !== undefined) setWhatsappQrCode(data.whatsapp_qrcode);
-        if (data.cartoes) setCartoes(data.cartoes);
-        if (data.bancos) setBancos(data.bancos);
-        if (data.contasFixas) setContasFixas(data.contasFixas);
+    const unsubUser = onSnapshot(userDocRef, async (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setStatusAssinatura(data.status_assinatura || 'ATIVO');
+        setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
+        setWhatsappQrCode(data.whatsapp_qr || '');
+        if (data.categorias) setCategorias(data.categorias);
         if (data.subcategorias) setSubcategorias(data.subcategorias);
+        if (data.orcamentos) setOrcamentos(data.orcamentos);
+      } else {
+        await setDoc(userDocRef, {
+          email: user.email,
+          status_assinatura: 'ATIVO',
+          whatsapp_status: 'DISCONNECTED',
+          criadoEm: serverTimestamp()
+        }, { merge: true });
+        setStatusAssinatura('ATIVO');
       }
     });
 
-    const q = query(collection(db, 'users', user.uid, 'transacoes'), orderBy('criadoEm', 'desc'));
-
-    const unsubTrans = onSnapshot(q, (snapshot) => {
-      const lista = snapshot.docs.map(docSnap => {
-        const dataDoc = docSnap.data();
-        let anoMes = dataDoc.anoMes;
-        let dataIso = dataDoc.data_vencimento;
-        
-        if (!anoMes && dataDoc.criadoEm) {
-          const d = dataDoc.criadoEm.toDate ? dataDoc.criadoEm.toDate() : new Date();
-          anoMes = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-          if (!dataIso) dataIso = `${anoMes}-${String(d.getDate()).padStart(2, '0')}`;
-        }
-
-        return {
-          id: docSnap.id,
-          ...dataDoc,
-          subcategoria: dataDoc.subcategoria || 'Geral',
-          pago: dataDoc.pago !== undefined ? dataDoc.pago : true,
-          data_vencimento: dataIso || `${anoMes || mesAtualStr}-10`,
-          anoMes: anoMes || mesAtualStr
-        };
-      });
+    // 2. Transações
+    const qTrans = query(collection(db, 'users', user.uid, 'transacoes'), orderBy('criadoEm', 'desc'));
+    const unsubTrans = onSnapshot(qTrans, (snap) => {
+      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       setTransacoes(lista);
     });
+
+    // 3. Cartões de Crédito
+    const unsubCartoes = onSnapshot(collection(db, 'users', user.uid, 'cartoes'), (snap) => {
+      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setCartoes(lista);
+      if (lista.length > 0) {
+        setNovaCompraCartao(prev => ({ ...prev, cartaoNome: prev.cartaoNome || lista[0].nome }));
+      }
+    });
+
+    // 4. Bancos / Contas
+    const unsubBancos = onSnapshot(collection(db, 'users', user.uid, 'bancos'), async (snap) => {
+      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (lista.length === 0) {
+        await addDoc(collection(db, 'users', user.uid, 'bancos'), {
+          nome: 'Itaú',
+          tipo: 'Conta Corrente / Débito',
+          saldoInicial: 0
+        });
+      } else {
+        setBancos(lista);
+        setNovaCompraCartao(prev => ({ ...prev, bancoNome: prev.bancoNome || lista[0].nome }));
+        setFormTransferencia(prev => ({
+          ...prev,
+          bancoOrigem: prev.bancoOrigem || lista[0].nome,
+          bancoDestino: prev.bancoDestino || (lista[1]?.nome || lista[0].nome)
+        }));
+      }
+    });
+
+    // 5. Contas Fixas Recorrentes
+    const unsubFixas = onSnapshot(collection(db, 'users', user.uid, 'contas_fixas'), (snap) => {
+      setContasFixas(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    // 6. Lista de Clientes se for Master
+    let unsubAdmin = () => {};
+    if (user.email === MASTER_EMAIL) {
+      unsubAdmin = onSnapshot(collection(db, 'users'), (snap) => {
+        setClientesAdmin(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      }, () => {});
+    }
 
     return () => {
       unsubUser();
       unsubTrans();
+      unsubCartoes();
+      unsubBancos();
+      unsubFixas();
+      unsubAdmin();
     };
   }, [user]);
 
-  useEffect(() => {
-    if (user && isMaster) {
-      const fetchAdminData = async () => {
-        try {
-          const querySnapshot = await getDocs(collection(db, 'users'));
-          const listaClientes = [];
-          querySnapshot.forEach((d) => {
-            listaClientes.push({ id: d.id, ...d.data() });
-          });
-          setClientesAdmin(listaClientes);
-        } catch (error) {
-          console.error("Erro ao procurar clientes", error);
-        }
-      };
-      fetchAdminData();
-    }
-  }, [user, isMaster]);
-
-  // Função para corrigir no Firebase todas as compras de cartão gravadas com mês antigo
-  const recalcularFaturasBanco = async () => {
-    if (!user) return;
-    const batch = writeBatch(db);
-    let contador = 0;
-
-    transacoes.forEach(t => {
-      if (t.metodo === 'CREDITO' && t.cartao_nome) {
-        const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
-        if (ciclo.anoMes !== t.anoMes || ciclo.data_vencimento !== t.data_vencimento) {
-          batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
-            anoMes: ciclo.anoMes,
-            data_vencimento: ciclo.data_vencimento
-          });
-          contador++;
-        }
-      }
-    });
-
-    if (contador > 0) {
-      await batch.commit();
-      alert(`✅ ${contador} lançamento(s) de cartão foram atualizados para o mês de vencimento correto!`);
-    } else {
-      alert('✅ Todas as faturas já estão sincronizadas com o ciclo correto!');
-    }
-  };
-
+  // ==========================================================================
+  // FUNÇÕES DE AUTENTICAÇÃO E WHATSAPP
+  // ==========================================================================
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     setErroAuth('');
@@ -427,211 +343,176 @@ export default function App() {
       } else {
         await createUserWithEmailAndPassword(auth, emailInput, senhaInput);
       }
-    } catch (error) {
-      if (error.code === 'auth/invalid-credential') setErroAuth('E-mail ou senha incorretos.');
-      else if (error.code === 'auth/email-already-in-use') setErroAuth('Este e-mail já está cadastrado.');
-      else setErroAuth('Ocorreu um erro. Verifique os dados.');
+    } catch (err) {
+      setErroAuth('Falha na autenticação. Verifique seu e-mail e senha.');
     }
   };
 
-  const handleLogout = async () => await signOut(auth);
+  const handleLogout = () => signOut(auth);
+
+  const alterarMesCompetencia = (delta) => {
+    const [ano, mes] = filtroMesAno.split('-').map(Number);
+    const novaData = new Date(ano, (mes - 1) + delta, 1);
+    setFiltroMesAno(`${novaData.getFullYear()}-${String(novaData.getMonth() + 1).padStart(2, '0')}`);
+  };
 
   const solicitarConexaoWhatsApp = async () => {
-    if (!user) return;
     setCarregandoQr(true);
     try {
-      await fetch(`${RENDER_API_URL}/conectar`, {
+      await fetch(`${RENDER_API_URL}/whatsapp/iniciar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
         body: JSON.stringify({ userId: user.uid })
       });
     } catch (e) {
-      alert('O servidor pode estar acordando. Aguarde 15 segundos e tente novamente.');
+      alert('Erro ao solicitar QR Code ao servidor.');
     } finally {
       setCarregandoQr(false);
     }
   };
 
   const desconectarWhatsApp = async () => {
-    if (!user) return;
     try {
-      await fetch(`${RENDER_API_URL}/desconectar`, {
+      await fetch(`${RENDER_API_URL}/whatsapp/desconectar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
         body: JSON.stringify({ userId: user.uid })
       });
-      setWhatsappStatus('DISCONNECTED');
-      setWhatsappQrCode(null);
+      await updateDoc(doc(db, 'users', user.uid), { whatsapp_status: 'DISCONNECTED', whatsapp_qr: '' });
     } catch (e) {
-      alert('Erro ao desconectar aparelho.');
+      alert('Erro ao desconectar WhatsApp.');
     }
   };
 
   const dispararTesteAlertaWhatsApp = async () => {
     try {
-      await fetch(`${RENDER_API_URL}/verificar-alertas`, {
-        method: 'GET',
-        headers: { 'x-api-key': API_SECRET_KEY }
+      await fetch(`${RENDER_API_URL}/whatsapp/testar-alerta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
+        body: JSON.stringify({ userId: user.uid })
       });
-      alert('🔔 O comando de verificação de alertas foi acionado!');
+      alert('Solicitação de alerta enviada para o seu WhatsApp!');
     } catch (e) {
-      alert('Erro ao acionar verificação no servidor.');
+      alert('Erro ao disparar teste de alerta.');
     }
   };
 
+  // ==========================================================================
+  // CRUD: CARTÕES, BANCOS, TRANSFERÊNCIAS E CONTAS AGENDADAS/FIXAS
+  // ==========================================================================
+  const salvarCartao = async (e) => {
+    e.preventDefault();
+    if (!cartaoForm.nome || !user) return;
+    const payload = {
+      nome: cartaoForm.nome.trim(),
+      limite: Number(cartaoForm.limite || 0),
+      diaFechamento: Number(cartaoForm.diaFechamento || 5),
+      diaVencimento: Number(cartaoForm.diaVencimento || 12),
+      banco: cartaoForm.banco.trim()
+    };
+    if (cartaoForm.id) {
+      await updateDoc(doc(db, 'users', user.uid, 'cartoes', cartaoForm.id), payload);
+    } else {
+      await addDoc(collection(db, 'users', user.uid, 'cartoes'), payload);
+    }
+    setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
+  };
+
+  const editarCartao = (c) => setCartaoForm({ id: c.id, nome: c.nome, limite: c.limite, diaFechamento: c.diaFechamento, diaVencimento: c.diaVencimento, banco: c.banco || '' });
+  const excluirCartao = (id) => { if (window.confirm('Excluir este cartão?')) deleteDoc(doc(db, 'users', user.uid, 'cartoes', id)); };
+
+  const salvarBanco = async (e) => {
+    e.preventDefault();
+    if (!bancoForm.nome || !user) return;
+    const payload = {
+      nome: bancoForm.nome.trim(),
+      tipo: bancoForm.tipo,
+      saldoInicial: Number(bancoForm.saldoInicial || 0)
+    };
+    if (bancoForm.id) {
+      await updateDoc(doc(db, 'users', user.uid, 'bancos', bancoForm.id), payload);
+    } else {
+      await addDoc(collection(db, 'users', user.uid, 'bancos'), payload);
+    }
+    setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
+  };
+
+  const editarBanco = (b) => setBancoForm({ id: b.id, nome: b.nome, tipo: b.tipo, saldoInicial: b.saldoInicial || 0 });
+  const excluirBanco = (id) => { if (window.confirm('Excluir esta conta bancária?')) deleteDoc(doc(db, 'users', user.uid, 'bancos', id)); };
+
   const realizarTransferenciaEntreContas = async (e) => {
     e.preventDefault();
-    if (!user || !formTransferencia.valor) return;
-    if (formTransferencia.bancoOrigem === formTransferencia.bancoDestino) {
-      return alert('Selecione contas diferentes para a origem e o destino da transferência.');
+    const valorNum = parseFloat(formTransferencia.valor);
+    if (!valorNum || valorNum <= 0 || formTransferencia.bancoOrigem === formTransferencia.bancoDestino) {
+      return alert('Selecione bancos diferentes e informe um valor válido.');
     }
 
-    const valorNum = parseFloat(formTransferencia.valor);
-    if (isNaN(valorNum) || valorNum <= 0) return alert('Informe um valor válido.');
+    const batch = writeBatch(db);
+    const refSaida = doc(collection(db, 'users', user.uid, 'transacoes'));
+    const refEntrada = doc(collection(db, 'users', user.uid, 'transacoes'));
 
-    const dataTransf = formTransferencia.data || hojeIso;
-    const anoMesTransf = dataTransf.slice(0, 7);
-
-    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+    batch.set(refSaida, {
       descricao: `Transferência enviada para ${formTransferencia.bancoDestino}`,
       valor: valorNum,
       tipo: 'DESPESA',
       metodo: 'TRANSFERENCIA',
-      cartao_nome: null,
       banco_nome: formTransferencia.bancoOrigem,
-      categoria: 'Transferência',
-      subcategoria: 'Entre Contas',
+      categoria: 'Outros',
+      subcategoria: 'Transferência',
       pago: true,
-      data_vencimento: dataTransf,
-      anoMes: anoMesTransf,
+      data_vencimento: hojeIso,
+      anoMes: filtroMesAno,
       criadoEm: serverTimestamp()
     });
 
-    await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
+    batch.set(refEntrada, {
       descricao: `Transferência recebida de ${formTransferencia.bancoOrigem}`,
       valor: valorNum,
       tipo: 'RECEITA',
       metodo: 'TRANSFERENCIA',
-      cartao_nome: null,
       banco_nome: formTransferencia.bancoDestino,
-      categoria: 'Transferência',
-      subcategoria: 'Entre Contas',
+      categoria: 'Receita',
+      subcategoria: 'Transferência',
       pago: true,
-      data_vencimento: dataTransf,
-      anoMes: anoMesTransf,
+      data_vencimento: hojeIso,
+      anoMes: filtroMesAno,
       criadoEm: serverTimestamp()
     });
 
+    await batch.commit();
     setFormTransferencia({ ...formTransferencia, valor: '' });
-    alert(`🔄 Transferência de R$ ${valorNum.toFixed(2)} de ${formTransferencia.bancoOrigem} para ${formTransferencia.bancoDestino} registrada!`);
+    alert('Transferência concluída com sucesso!');
   };
 
-  const salvarCartao = async (e) => {
-    e.preventDefault();
-    if (!cartaoForm.nome.trim() || !user) return;
-
-    const novoObjeto = {
-      id: cartaoForm.id || Date.now().toString(),
-      nome: cartaoForm.nome.toUpperCase().trim(),
-      limite: Number(cartaoForm.limite) || 1000,
-      diaFechamento: Number(cartaoForm.diaFechamento) || 5,
-      diaVencimento: Number(cartaoForm.diaVencimento) || 12,
-      banco: cartaoForm.banco || 'Outro'
-    };
-
-    const novaLista = cartaoForm.id
-      ? cartoes.map(c => c.id === cartaoForm.id ? novoObjeto : c)
-      : [...cartoes, novoObjeto];
-
-    setCartoes(novaLista);
-    setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
-    await setDoc(doc(db, 'users', user.uid), { cartoes: novaLista }, { merge: true });
-  };
-
-  const editarCartao = (c) => {
-    setCartaoForm({
-      id: c.id,
-      nome: c.nome,
-      limite: c.limite,
-      diaFechamento: c.diaFechamento || 5,
-      diaVencimento: c.diaVencimento || 12,
-      banco: c.banco || ''
-    });
-  };
-
-  const excluirCartao = async (id) => {
-    const novaLista = cartoes.filter(c => c.id !== id);
-    setCartoes(novaLista);
-    await setDoc(doc(db, 'users', user.uid), { cartoes: novaLista }, { merge: true });
-  };
-
-  const salvarBanco = async (e) => {
-    e.preventDefault();
-    if (!bancoForm.nome.trim() || !user) return;
-
-    const novoBanco = {
-      id: bancoForm.id || Date.now().toString(),
-      nome: bancoForm.nome.trim(),
-      tipo: bancoForm.tipo || 'Conta Corrente / Débito',
-      saldoInicial: Number(bancoForm.saldoInicial) || 0
-    };
-
-    const novaLista = bancoForm.id
-      ? bancos.map(b => b.id === bancoForm.id ? novoBanco : b)
-      : [...bancos, novoBanco];
-
-    setBancos(novaLista);
-    setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
-    await setDoc(doc(db, 'users', user.uid), { bancos: novaLista }, { merge: true });
-  };
-
-  const editarBanco = (b) => {
-    setBancoForm({
-      id: b.id,
-      nome: b.nome,
-      tipo: b.tipo,
-      saldoInicial: b.saldoInicial || 0
-    });
-  };
-
-  const excluirBanco = async (id) => {
-    const novaLista = bancos.filter(b => b.id !== id);
-    setBancos(novaLista);
-    await setDoc(doc(db, 'users', user.uid), { bancos: novaLista }, { merge: true });
-  };
   const lancarContaAgendada = async (e) => {
     e.preventDefault();
     if (!formAgendamento.descricao || !formAgendamento.valor || !user) return;
-
-    const anoMesVenc = formAgendamento.data_vencimento ? formAgendamento.data_vencimento.slice(0, 7) : filtroMesAno;
+    const anoMesVenc = formAgendamento.data_vencimento.slice(0, 7);
 
     await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
-      descricao: formAgendamento.descricao,
-      valor: Number(formAgendamento.valor),
+      descricao: formAgendamento.descricao.trim(),
+      valor: parseFloat(formAgendamento.valor),
       tipo: formAgendamento.tipo,
-      metodo: formAgendamento.pago ? 'PIX/BOLETO' : 'BOLETO / AGENDADO',
-      cartao_nome: null,
-      banco_nome: formAgendamento.banco_nome || bancos[0]?.nome || null,
+      metodo: 'BOLETO / AGENDADO',
       categoria: formAgendamento.categoria,
       subcategoria: formAgendamento.subcategoria || 'Geral',
-      pago: Boolean(formAgendamento.pago),
-      data_vencimento: formAgendamento.data_vencimento || hojeIso,
+      pago: false,
+      data_vencimento: formAgendamento.data_vencimento,
       anoMes: anoMesVenc,
-      mensagem_original: `Agendamento manual: ${formAgendamento.descricao}`,
       criadoEm: serverTimestamp()
     });
 
-    setFormAgendamento({ ...formAgendamento, descricao: '', valor: '', pago: false });
+    setFormAgendamento({ ...formAgendamento, descricao: '', valor: '' });
   };
 
-  const clicarDarBaixaConta = (transacao) => {
-    if (transacao.pago) {
-      updateDoc(doc(db, 'users', user.uid, 'transacoes', transacao.id), { pago: false });
+  const clicarDarBaixaConta = async (t) => {
+    if (t.pago) {
+      await updateDoc(doc(db, 'users', user.uid, 'transacoes', t.id), { pago: false });
     } else {
       setModalBaixaConta({
-        transacao,
-        bancoEscolhido: transacao.banco_nome || bancos[0]?.nome || 'Itaú',
-        metodoEscolhido: 'PIX'
+        transacao: t,
+        metodoEscolhido: 'PIX',
+        bancoEscolhido: bancos[0]?.nome || 'Itaú'
       });
     }
   };
@@ -639,50 +520,65 @@ export default function App() {
   const confirmarBaixaContaModal = async (e) => {
     e.preventDefault();
     if (!modalBaixaConta || !user) return;
-    const { transacao, bancoEscolhido, metodoEscolhido } = modalBaixaConta;
-    await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacao.id), {
+    await updateDoc(doc(db, 'users', user.uid, 'transacoes', modalBaixaConta.transacao.id), {
       pago: true,
-      metodo: metodoEscolhido,
-      banco_nome: bancoEscolhido
+      metodo: modalBaixaConta.metodoEscolhido,
+      banco_nome: modalBaixaConta.bancoEscolhido
     });
     setModalBaixaConta(null);
   };
 
+  const recalcularFaturasBanco = async () => {
+    if (!user) return;
+    const batch = writeBatch(db);
+    let alterados = 0;
+
+    transacoes.forEach(t => {
+      if (t.metodo === 'CREDITO' && t.cartao_nome && t.data_compra) {
+        const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
+        if (ciclo.anoMes !== t.anoMes || ciclo.data_vencimento !== t.data_vencimento) {
+          batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
+            anoMes: ciclo.anoMes,
+            data_vencimento: ciclo.data_vencimento
+          });
+          alterados++;
+        }
+      }
+    });
+
+    if (alterados > 0) {
+      await batch.commit();
+      alert(`${alterados} lançamento(s) de cartão sincronizados com o ciclo de fechamento!`);
+    } else {
+      alert('Todas as faturas já estão sincronizadas corretamente.');
+    }
+  };
+
   const adicionarContaFixa = async (e) => {
     e.preventDefault();
-    if (!fixaNome || !fixaValor || !user) return;
-    const novas = [...contasFixas, {
-      id: Date.now().toString(),
-      nome: fixaNome,
-      valorPadrao: Number(fixaValor),
-      diaVencimento: Number(fixaDia) || 10,
-      categoria: 'Contas'
-    }];
-    setContasFixas(novas);
+    if (!fixaNome || !fixaValor || !fixaDia || !user) return;
+    await addDoc(collection(db, 'users', user.uid, 'contas_fixas'), {
+      nome: fixaNome.trim(),
+      valorPadrao: parseFloat(fixaValor),
+      diaVencimento: Number(fixaDia)
+    });
     setFixaNome('');
     setFixaValor('');
     setFixaDia('');
-    await setDoc(doc(db, 'users', user.uid), { contasFixas: novas }, { merge: true });
   };
 
-  const excluirContaFixa = async (id) => {
-    const novas = contasFixas.filter(c => c.id !== id);
-    setContasFixas(novas);
-    await setDoc(doc(db, 'users', user.uid), { contasFixas: novas }, { merge: true });
-  };
+  const excluirContaFixa = (id) => deleteDoc(doc(db, 'users', user.uid, 'contas_fixas', id));
 
   const pagarContaFixaRapido = async (conta) => {
-    if (!user) return;
     const diaStr = String(conta.diaVencimento || 10).padStart(2, '0');
     await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
       descricao: conta.nome,
-      valor: Number(conta.valorPadrao),
+      valor: Number(conta.valorPadrao || 0),
       tipo: 'DESPESA',
       metodo: 'PIX',
-      cartao_nome: null,
-      banco_nome: bancos[0]?.nome || null,
-      categoria: conta.categoria || 'Contas',
-      subcategoria: 'Casa / Fixas',
+      banco_nome: bancos[0]?.nome || 'Itaú',
+      categoria: 'Contas',
+      subcategoria: 'Residencial',
       pago: true,
       data_vencimento: `${filtroMesAno}-${diaStr}`,
       anoMes: filtroMesAno,
@@ -692,7 +588,6 @@ export default function App() {
     });
   };
 
-  // Lógica Flexível de Lançamento (Cartão, PIX, Dinheiro, Carnê)
   const lancarCompraCartaoManual = async (e) => {
     e.preventDefault();
     if (!novaCompraCartao.descricao || !novaCompraCartao.valorTotal || !user) return;
@@ -762,6 +657,7 @@ export default function App() {
     });
   };
 
+  // CORRIGIDO: Protegido contra data_vencimento / anoMes undefined no updateDoc
   const confirmarPagamentoFatura = async (e) => {
     e.preventDefault();
     if (!modalPagarFatura || !user) return;
@@ -775,13 +671,18 @@ export default function App() {
       const comprasDaFatura = transacoesComCicloCorrigido.filter(
         t => t.anoMes === filtroMesAno && t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === cartaoNome.toLowerCase() && !t.fatura_paga
       );
+      
+      const batch = writeBatch(db);
       for (const item of comprasDaFatura) {
-        await updateDoc(doc(db, 'users', user.uid, 'transacoes', item.id), {
+        const docRef = doc(db, 'users', user.uid, 'transacoes', item.id);
+        batch.update(docRef, {
           fatura_paga: true,
-          anoMes: item.anoMes,
-          data_vencimento: item.data_vencimento
+          anoMes: item.anoMes || filtroMesAno,
+          data_vencimento: item.data_vencimento || `${filtroMesAno}-12`
         });
       }
+      await batch.commit();
+
       await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
         descricao: `Pagamento Total Fatura Cartão ${cartaoNome}`,
         valor: modalPagarFatura.valorFatura,
@@ -960,6 +861,9 @@ export default function App() {
     await setDoc(doc(db, 'users', user.uid), { categorias: novasCats, orcamentos: novosOrcamentos }, { merge: true });
   };
 
+  // ==========================================================================
+  // INTERPRETAÇÃO NLP E SIMULADOR DO WHATSAPP
+  // ==========================================================================
   const extrairDataTextoSimulador = (texto) => {
     const anoAtual = dataAtualObj.getFullYear();
     const mesAtual = dataAtualObj.getMonth() + 1;
@@ -1177,7 +1081,6 @@ export default function App() {
       const prim = pendentes[0];
       const listaStr = pendentes.map(i => `• *${i.descricao}* — R$ ${i.valorTotal.toFixed(2)}`).join('\n');
 
-      // PRIORIDADE CORRIGIDA: Pergunta sempre o método ANTES de perguntar a data
       if (!prim.metodo && prim.pago !== false) {
         setPendenteSimulador({ etapa: 'METODO', itens: pendentes, textoOriginal });
         msgs.push(`❓ *Qual foi a forma de pagamento?*\n${listaStr}\n\nResponda com: *Pix*, *Débito*, *Dinheiro* ou o cartão (*${cartoes.map(c => c.nome).join(', ')}*).`);
@@ -1400,7 +1303,6 @@ export default function App() {
       if (data.invoiceUrl) setLinkPagamentoAsaas(data.invoiceUrl);
     } catch (e) { alert('Erro ao conectar com o sistema de pagamentos.'); } finally { setGerandoPix(false); }
   };
-
   if (carregandoAuth) {
     return (
       <div className="min-h-screen bg-slate-950 text-emerald-400 flex items-center justify-center font-medium">
@@ -1457,7 +1359,6 @@ export default function App() {
     );
   }
 
-  // Se for o MASTER, ignora a tela de verificação e bloqueio
   if (!isMaster) {
     if (statusAssinatura === 'VERIFICANDO') {
       return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-emerald-400 font-medium">Verificando licença...</div>;
@@ -1497,8 +1398,8 @@ export default function App() {
     const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
     return {
       ...t,
-      anoMes: ciclo.anoMes,
-      data_vencimento: ciclo.data_vencimento
+      anoMes: ciclo.anoMes || mesAtualStr,
+      data_vencimento: ciclo.data_vencimento || `${mesAtualStr}-10`
     };
   });
 
@@ -2038,7 +1939,6 @@ export default function App() {
               <span className={`w-2.5 h-2.5 rounded-full ${whatsappStatus === 'CONNECTED' ? 'bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-amber-400 animate-pulse'}`}></span>
             </button>
 
-            {/* ABA MASTER ADMIN */}
             {isMaster && (
               <button onClick={() => setAbaAtiva('admin')} className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-medium transition mt-4 border ${abaAtiva === 'admin' ? 'bg-amber-500 text-slate-950 font-semibold border-amber-400 shadow-lg shadow-amber-500/20' : 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20'}`}>
                 <Users className="w-4 h-4" /> Painel Master
@@ -2079,7 +1979,7 @@ export default function App() {
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
                 <div className="space-y-3">
                   {clientesAdmin.length === 0 ? (
-                    <p className="text-sm text-slate-500 text-center py-4">Nenhum cliente carregado.</p>
+                    <p className="text-sm text-slate-500 text-center py-4">Nenhum cliente carregado (verifique as regras de leitura global no Firestore).</p>
                   ) : (
                     clientesAdmin.map(cliente => (
                       <div key={cliente.id} className="bg-slate-950/70 border border-slate-800 p-4 rounded-xl flex items-center justify-between">
@@ -2334,7 +2234,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* GRÁFICOS (COM DRILL-DOWN CATEGORIA > SUBCATEGORIA) */}
+              {/* GRÁFICOS */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl flex flex-col items-center shadow-xl">
                   <div className="w-full flex justify-between items-center mb-3">
@@ -2900,7 +2800,7 @@ export default function App() {
                 ))}
               </div>
 
-              {/* FORMULÁRIO DE LANÇAMENTO FLEXÍVEL (CARTÃO, PIX, BOLETO, DINHEIRO) */}
+              {/* FORMULÁRIO DE LANÇAMENTO FLEXÍVEL */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                   <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra (À Vista ou Parcelada)
