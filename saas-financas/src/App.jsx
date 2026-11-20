@@ -40,20 +40,13 @@ const formatarDataBR = (isoDate) => {
 
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, numParcela = 1) => {
   const [ano, mes, dia] = (dataCompraIso || new Date().toISOString().split('T')[0]).split('-').map(Number);
-  let mesFatura = mes - 1; // 0-indexed
+  let mesFatura = mes - 1;
   let anoFatura = ano;
 
-  // Se comprou no dia do fechamento ou depois, vai para a próxima fatura
   if (dia >= Number(diaFechamento)) {
     mesFatura += 1;
   }
 
-  // Se o dia de vencimento for menor que o fechamento, a fatura vence no mês seguinte ao fechamento
-  if (Number(diaVencimento) < Number(diaFechamento)) {
-    mesFatura += 1;
-  }
-
-  // Soma o deslocamento da parcela (parcela 1 = +0 meses, parcela 2 = +1 mês, etc.)
   mesFatura += (numParcela - 1);
 
   const dataVencObj = new Date(anoFatura, mesFatura, Number(diaVencimento));
@@ -68,12 +61,19 @@ const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, n
 };
 
 const obterCicloFaturaReal = (transacao, cartoes, mesFallback) => {
-  if (transacao.metodo !== 'CREDITO' || !transacao.cartao_nome) {
+  // Se a transação já tem anoMes definido no banco, respeita o mês em que ela foi lançada
+  if (transacao.anoMes) {
     return {
-      anoMes: transacao.anoMes || mesFallback,
-      data_vencimento: transacao.data_vencimento
+      anoMes: transacao.anoMes,
+      data_vencimento: transacao.data_vencimento || `${transacao.anoMes}-10`
     };
   }
+
+  return {
+    anoMes: mesFallback,
+    data_vencimento: transacao.data_vencimento
+  };
+};
 
   const cartao = cartoes.find(c => c.nome.toLowerCase() === transacao.cartao_nome.toLowerCase());
   if (!cartao || !transacao.data_compra) {
