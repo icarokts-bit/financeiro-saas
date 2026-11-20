@@ -1295,12 +1295,10 @@ export default function App() {
 
     const userDocRef = doc(db, 'users', user.uid);
 
-    // 1. Escuta em tempo real o documento principal do usuário (arrays bancos, cartoes, etc.)
     const unsubUserDoc = onSnapshot(userDocRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
 
-        // Carrega arrays exatos do documento users/{uid}
         setBancos(Array.isArray(data.bancos) ? data.bancos : []);
         setCartoes(Array.isArray(data.cartoes) ? data.cartoes : []);
         setContasFixas(Array.isArray(data.contas_fixas) ? data.contas_fixas : []);
@@ -1315,7 +1313,6 @@ export default function App() {
           setOrcamentos(data.orcamentos);
         }
 
-        // Verifica assinatura
         if (data.status_assinatura) {
           setStatusAssinatura(data.status_assinatura);
         } else {
@@ -1326,7 +1323,6 @@ export default function App() {
       }
     });
 
-    // 2. Escuta as transações (subcoleção users/{uid}/transacoes ou coleção raiz filtrada por uid)
     const qTransacoesSub = collection(db, 'users', user.uid, 'transacoes');
     const unsubTransacoes = onSnapshot(qTransacoesSub, (snap) => {
       const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -1338,89 +1334,6 @@ export default function App() {
       unsubTransacoes();
     };
   }, [user]);
-
-  // ==========================================================================
-  // FUNÇÕES DE SALVAMENTO DIRETO NOS ARRAYS DE users/{user.uid}
-  // ==========================================================================
-  const salvarCartao = async (e) => {
-    e.preventDefault();
-    if (!user || !cartaoForm.nome) return;
-
-    const userDocRef = doc(db, 'users', user.uid);
-    let novosCartoes = [...cartoes];
-
-    if (cartaoForm.id) {
-      novosCartoes = novosCartoes.map(c =>
-        c.id === cartaoForm.id
-          ? {
-              ...c,
-              nome: cartaoForm.nome.trim(),
-              limite: Number(cartaoForm.limite || 0),
-              diaFechamento: Number(cartaoForm.diaFechamento || 5),
-              diaVencimento: Number(cartaoForm.diaVencimento || 12),
-              banco: cartaoForm.banco.trim()
-            }
-          : c
-      );
-    } else {
-      novosCartoes.push({
-        id: String(Date.now()),
-        nome: cartaoForm.nome.trim(),
-        limite: Number(cartaoForm.limite || 0),
-        diaFechamento: Number(cartaoForm.diaFechamento || 5),
-        diaVencimento: Number(cartaoForm.diaVencimento || 12),
-        banco: cartaoForm.banco.trim()
-      });
-    }
-
-    await setDoc(userDocRef, { cartoes: novosCartoes }, { merge: true });
-    setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
-  };
-
-  const excluirCartao = async (idCartao) => {
-    if (!user || !window.confirm('Deseja excluir este cartão?')) return;
-    const userDocRef = doc(db, 'users', user.uid);
-    const novosCartoes = cartoes.filter(c => c.id !== idCartao);
-    await setDoc(userDocRef, { cartoes: novosCartoes }, { merge: true });
-  };
-
-  const salvarBanco = async (e) => {
-    e.preventDefault();
-    if (!user || !bancoForm.nome) return;
-
-    const userDocRef = doc(db, 'users', user.uid);
-    let novosBancos = [...bancos];
-
-    if (bancoForm.id) {
-      novosBancos = novosBancos.map(b =>
-        b.id === bancoForm.id
-          ? {
-              ...b,
-              nome: bancoForm.nome.trim(),
-              tipo: bancoForm.tipo,
-              saldoInicial: Number(bancoForm.saldoInicial || 0)
-            }
-          : b
-      );
-    } else {
-      novosBancos.push({
-        id: String(Date.now()),
-        nome: bancoForm.nome.trim(),
-        tipo: bancoForm.tipo,
-        saldoInicial: Number(bancoForm.saldoInicial || 0)
-      });
-    }
-
-    await setDoc(userDocRef, { bancos: novosBancos }, { merge: true });
-    setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
-  };
-
-  const excluirBanco = async (idBanco) => {
-    if (!user || !window.confirm('Deseja excluir esta conta bancária?')) return;
-    const userDocRef = doc(db, 'users', user.uid);
-    const novosBancos = bancos.filter(b => b.id !== idBanco);
-    await setDoc(userDocRef, { bancos: novosBancos }, { merge: true });
-  };
 
 // ============================================================================
 // ==================== INÍCIO PARTE 4 DE 4: CÁLCULOS E INTERFACE JSX =========
