@@ -1,40 +1,54 @@
+// ============================================================================
+// ==================== INÍCIO PARTE 1 DE 4: IMPORTS E ESTADOS ================
+// ============================================================================
+
 import React, { useState, useEffect } from 'react';
-import { 
-  Wallet, TrendingUp, TrendingDown, CreditCard, Landmark, 
-  QrCode, MessageSquare, Send, Plus, Trash2, Edit3, X, 
-  BarChart2, FileText, Clock, FolderPlus, Users, LogOut, 
-  Sparkles, Calendar, ChevronLeft, ChevronRight, AlertTriangle, 
-  ShieldAlert, BrainCircuit, Target, Search, BellRing, 
-  CheckCircle2, Zap, ArrowRightLeft, RefreshCw 
+import {
+  Wallet, Sparkles, CheckCircle2, RefreshCw, LogOut, BarChart2,
+  FileText, Clock, CreditCard, Landmark, FolderPlus, QrCode, Users,
+  Calendar, ChevronLeft, ChevronRight, AlertTriangle, ShieldAlert,
+  TrendingUp, TrendingDown, BrainCircuit, Target, Search, Edit3,
+  Trash2, BellRing, Zap, ArrowRightLeft, Plus, MessageSquare, Send, X
 } from 'lucide-react';
-import { 
-  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer 
+import {
+  PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis
 } from 'recharts';
-import { 
-  onAuthStateChanged, signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, signOut 
+import {
+  onAuthStateChanged, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, signOut
 } from 'firebase/auth';
-import { 
-  collection, doc, setDoc, addDoc, updateDoc, 
-  deleteDoc, onSnapshot, query, where, orderBy, getDocs, 
-  writeBatch, serverTimestamp 
+import {
+  collection, doc, setDoc, addDoc, updateDoc,
+  deleteDoc, onSnapshot, query, where, orderBy, getDocs,
+  writeBatch, serverTimestamp
 } from 'firebase/firestore';
 import { db, auth } from './firebaseConfig';
 
 const RENDER_API_URL = import.meta.env.VITE_RENDER_API_URL || 'https://sua-api.onrender.com';
-const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'sua-chave-secreta';
-const MASTER_EMAIL = 'admin@finzap.com.br'; // Ajuste para o seu e-mail Master
+const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'SUA_CHAVE_SECRETA';
+const MASTER_EMAIL = 'icaro.kts@gmail.com';
 
-const CORES_GRAFICO = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+const CORES_GRAFICO = ['#10b981', '#3b82f6', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#f43f5e'];
 
-// ==========================================================================
-// FUNÇÕES AUXILIARES DE DATA E FATURA
-// ==========================================================================
+const CATEGORIAS_PADRAO = [
+  'Alimentação', 'Moradia', 'Transporte', 'Lazer', 'Saúde', 'Contas', 'Receita', 'Outros'
+];
 
-const formatarDataBR = (isoDate) => {
-  if (!isoDate) return '--/--/----';
-  const partes = isoDate.split('T')[0].split('-');
-  if (partes.length !== 3) return isoDate;
+const SUBCATEGORIAS_PADRAO = {
+  'Alimentação': ['Mercado', 'Lazer', 'Restaurante', 'Delivery', 'Geral'],
+  'Moradia': ['Aluguel', 'Condomínio', 'Manutenção', 'Geral'],
+  'Transporte': ['Combustível', 'Uber / 99', 'Estacionamento', 'Manutenção', 'Geral'],
+  'Lazer': ['Cinema / Eventos', 'Viagem', 'Streaming', 'Geral'],
+  'Saúde': ['Farmácia', 'Consulta', 'Academia', 'Geral'],
+  'Contas': ['Energia', 'Água', 'Internet', 'Fatura Cartão', 'Geral'],
+  'Receita': ['Salário / Vendas', 'Extra', 'Reembolso', 'Geral'],
+  'Outros': ['Geral']
+};
+
+const formatarDataBR = (dataIso) => {
+  if (!dataIso) return '';
+  const partes = dataIso.split('-');
+  if (partes.length !== 3) return dataIso;
   return `${partes[2]}/${partes[1]}/${partes[0]}`;
 };
 
@@ -61,7 +75,6 @@ const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, n
 };
 
 const obterCicloFaturaReal = (transacao, cartoes, mesFallback) => {
-  // Se a transação já tem anoMes definido no banco, respeita o mês em que ela foi lançada
   if (transacao.anoMes) {
     return {
       anoMes: transacao.anoMes,
@@ -75,57 +88,42 @@ const obterCicloFaturaReal = (transacao, cartoes, mesFallback) => {
   };
 };
 
-  const cartao = cartoes.find(c => c.nome.toLowerCase() === transacao.cartao_nome.toLowerCase());
-  if (!cartao || !transacao.data_compra) {
-    return {
-      anoMes: transacao.anoMes || mesFallback,
-      data_vencimento: transacao.data_vencimento
-    };
-  }
-
-  const parcelaAtual = Number(transacao.parcela_atual || 1);
-  const calc = calcularDataFaturaCartao(
-    transacao.data_compra,
-    cartao.diaFechamento || 5,
-    cartao.diaVencimento || 12,
-    parcelaAtual
-  );
-
-  return {
-    anoMes: calc.anoMes,
-    data_vencimento: calc.dataVencimento
-  };
-};
-
 const classificarCategoriaLocal = (texto, isReceita, categorias, subcategorias) => {
   const txt = texto.toLowerCase();
   if (isReceita) {
-    return { categoria: 'Receita', subcategoria: 'Entradas', reconhecida: true };
+    return { categoria: 'Receita', subcategoria: 'Salário / Vendas', reconhecida: true };
   }
-
-  const regras = [
-    { palavras: ['mercado', 'supermercado', 'maçã', 'banana', 'arroz', 'feijão', 'carne', 'açougue', 'padaria', 'pão', 'leite', 'feira'], cat: 'Alimentação', sub: 'Mercado' },
-    { palavras: ['lanche', 'ifood', 'restaurante', 'pizza', 'hamburguer', 'sorvete', 'açaí', 'bar', 'cerveja', 'jantar', 'almoço'], cat: 'Alimentação', sub: 'Lazer' },
-    { palavras: ['uber', '99', 'gasolina', 'etanol', 'posto', 'combustível', 'estacionamento', 'pedágio', 'ônibus', 'metrô'], cat: 'Transporte', sub: 'Combustível / App' },
-    { palavras: ['energia', 'luz', 'água', 'internet', 'aluguel', 'condomínio', 'celular', 'vivo', 'claro', 'tim', 'fatura'], cat: 'Contas', sub: 'Residencial' },
-    { palavras: ['farmácia', 'remédio', 'médico', 'consulta', 'exame', 'dentista', 'hospital'], cat: 'Saúde', sub: 'Farmácia / Médico' },
-    { palavras: ['cinema', 'netflix', 'spotify', 'jogo', 'viagem', 'hotel', 'passeio'], cat: 'Lazer', sub: 'Entretenimento' }
-  ];
-
-  for (const r of regras) {
-    if (r.palavras.some(p => txt.includes(p))) {
-      const catExiste = categorias.includes(r.cat) ? r.cat : categorias[0] || 'Outros';
-      const subExiste = (subcategorias[catExiste] || []).includes(r.sub) ? r.sub : (subcategorias[catExiste]?.[0] || 'Geral');
-      return { categoria: catExiste, subcategoria: subExiste, reconhecida: true };
-    }
+  if (/mercado|maçã|maca|banana|arroz|feijão|feijao|açougue|acougue|padaria|pão|pao|leite|feira|supermercado/i.test(txt)) {
+    return { categoria: 'Alimentação', subcategoria: 'Mercado', reconhecida: true };
   }
-
+  if (/lanche|hamburguer|burger|pizza|ifood|restaurante|almoço|almoco|jantar|sorvete|açaí|acai|café|cafe/i.test(txt)) {
+    return { categoria: 'Alimentação', subcategoria: 'Lazer', reconhecida: true };
+  }
+  if (/uber|99|gasolina|etanol|combustível|combustivel|posto|estacionamento|pedágio|pedagio|ônibus|onibus/i.test(txt)) {
+    return { categoria: 'Transporte', subcategoria: 'Combustível', reconhecida: true };
+  }
+  if (/água|agua|energia|luz|internet|wifi|telefone|celular|boleto|fatura/i.test(txt)) {
+    return { categoria: 'Contas', subcategoria: 'Geral', reconhecida: true };
+  }
+  if (/farmácia|farmacia|remédio|remedio|médico|medico|consulta|dentista|exame|academia/i.test(txt)) {
+    return { categoria: 'Saúde', subcategoria: 'Farmácia', reconhecida: true };
+  }
+  if (/aluguel|condomínio|condominio|iptu|reforma|móveis|moveis/i.test(txt)) {
+    return { categoria: 'Moradia', subcategoria: 'Geral', reconhecida: true };
+  }
+  if (/cinema|show|jogo|netflix|spotify|viagem|hotel|pousada/i.test(txt)) {
+    return { categoria: 'Lazer', subcategoria: 'Cinema / Eventos', reconhecida: true };
+  }
   return { categoria: 'Outros', subcategoria: 'Geral', reconhecida: false };
 };
+
 export default function App() {
-  // ==========================================================================
-  // ESTADOS DE AUTENTICAÇÃO E ASSINATURA
-  // ==========================================================================
+  const dataAtualObj = new Date();
+  const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
+  const hojeIso = dataAtualObj.toISOString().split('T')[0];
+  const diaHoje = dataAtualObj.getDate();
+
+  // Autenticação & SaaS
   const [user, setUser] = useState(null);
   const [carregandoAuth, setCarregandoAuth] = useState(true);
   const [isLoginMode, setIsLoginMode] = useState(true);
@@ -136,59 +134,32 @@ export default function App() {
   const [linkPagamentoAsaas, setLinkPagamentoAsaas] = useState('');
   const [gerandoPix, setGerandoPix] = useState(false);
 
-  const isMaster = user?.email === MASTER_EMAIL;
-  const [clientesAdmin, setClientesAdmin] = useState([]);
-
-  // ==========================================================================
-  // ESTADOS DE DATAS E COMPETÊNCIA ATIVA
-  // ==========================================================================
-  const dataAtualObj = new Date();
-  const diaHoje = dataAtualObj.getDate();
-  const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
-  const hojeIso = `${mesAtualStr}-${String(diaHoje).padStart(2, '0')}`;
-
-  const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
+  // Navegação & Filtros Globais
   const [abaAtiva, setAbaAtiva] = useState('dashboard');
+  const [filtroMesAno, setFiltroMesAno] = useState(mesAtualStr);
 
-  // ==========================================================================
-  // ESTADOS DE DADOS FINANCEIROS (FIRESTORE)
-  // ==========================================================================
+  // Dados Financeiros
   const [transacoes, setTransacoes] = useState([]);
   const [cartoes, setCartoes] = useState([]);
   const [bancos, setBancos] = useState([]);
   const [contasFixas, setContasFixas] = useState([]);
-  const [categorias, setCategorias] = useState(['Alimentação', 'Transporte', 'Contas', 'Saúde', 'Lazer', 'Outros', 'Receita']);
-  const [subcategorias, setSubcategorias] = useState({
-    Alimentação: ['Mercado', 'Lazer', 'Geral'],
-    Transporte: ['Combustível / App', 'Manutenção', 'Geral'],
-    Contas: ['Residencial', 'Fatura Cartão', 'Geral'],
-    Saúde: ['Farmácia / Médico', 'Geral'],
-    Lazer: ['Entretenimento', 'Geral'],
-    Outros: ['Geral'],
-    Receita: ['Entradas', 'Geral']
-  });
+  const [categorias, setCategorias] = useState(CATEGORIAS_PADRAO);
+  const [subcategorias, setSubcategorias] = useState(SUBCATEGORIAS_PADRAO);
   const [orcamentos, setOrcamentos] = useState({});
+  const [clientesAdmin, setClientesAdmin] = useState([]);
 
-  // ==========================================================================
-  // ESTADOS DE FORMULÁRIOS E MODAIS
-  // ==========================================================================
+  // WhatsApp Status & QR
+  const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
+  const [whatsappQrCode, setWhatsappQrCode] = useState('');
+  const [carregandoQr, setCarregandoQr] = useState(false);
+
+  // Formulários e Modais
   const [cartaoForm, setCartaoForm] = useState({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   const [bancoForm, setBancoForm] = useState({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
   const [formTransferencia, setFormTransferencia] = useState({ bancoOrigem: '', bancoDestino: '', valor: '' });
-  const [formAgendamento, setFormAgendamento] = useState({ descricao: '', valor: '', data_vencimento: hojeIso, tipo: 'DESPESA', categoria: 'Contas', subcategoria: 'Residencial' });
+  const [formAgendamento, setFormAgendamento] = useState({ descricao: '', valor: '', data_vencimento: hojeIso, tipo: 'DESPESA', categoria: 'Contas', subcategoria: 'Geral' });
   const [novaCompraCartao, setNovaCompraCartao] = useState({ descricao: '', valorTotal: '', parcelas: '1', metodo: 'CREDITO', cartaoNome: '', bancoNome: '', categoria: 'Outros', subcategoria: 'Geral' });
 
-  const [fixaNome, setFixaNome] = useState('');
-  const [fixaValor, setFixaValor] = useState('');
-  const [fixaDia, setFixaDia] = useState('');
-
-  const [novaCatNome, setNovaCatNome] = useState('');
-  const [catSelecionadaParaSub, setCatSelecionadaParaSub] = useState('Alimentação');
-  const [novaSubNome, setNovaSubNome] = useState('');
-  const [orcamentoCat, setOrcamentoCat] = useState('');
-  const [orcamentoValor, setOrcamentoValor] = useState('');
-
-  // Modais
   const [modalBaixaConta, setModalBaixaConta] = useState(null);
   const [modalPagarFatura, setModalPagarFatura] = useState(null);
   const [transacaoEditando, setTransacaoEditando] = useState(null);
@@ -196,7 +167,7 @@ export default function App() {
   const [transacaoExcluindo, setTransacaoExcluindo] = useState(null);
   const [aplicarFuturasExclusao, setAplicarFuturasExclusao] = useState(false);
 
-  // Filtros de Extrato, Vencimentos e Gráficos
+  // Filtros de Extrato / Vencimentos / Gráficos
   const [pesquisaExtrato, setPesquisaExtrato] = useState('');
   const [filtroTipoExtrato, setFiltroTipoExtrato] = useState('TODOS');
   const [filtroVencNome, setFiltroVencNome] = useState('');
@@ -206,45 +177,52 @@ export default function App() {
   const [cartaoSelecionadoFatura, setCartaoSelecionadoFatura] = useState('TODOS');
   const [categoriaSelecionadaGrafico, setCategoriaSelecionadaGrafico] = useState(null);
 
-  // ==========================================================================
-  // ESTADOS DO WHATSAPP E SIMULADOR
-  // ==========================================================================
-  const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
-  const [whatsappQrCode, setWhatsappQrCode] = useState('');
-  const [carregandoQr, setCarregandoQr] = useState(false);
+  // Categorias / Orçamentos / Contas Fixas Inputs
+  const [novaCatNome, setNovaCatNome] = useState('');
+  const [catSelecionadaParaSub, setCatSelecionadaParaSub] = useState('Alimentação');
+  const [novaSubNome, setNovaSubNome] = useState('');
+  const [orcamentoCat, setOrcamentoCat] = useState('');
+  const [orcamentoValor, setOrcamentoValor] = useState('');
+  const [fixaNome, setFixaNome] = useState('');
+  const [fixaValor, setFixaValor] = useState('');
+  const [fixaDia, setFixaDia] = useState('');
+
+  // Simulador WhatsApp
   const [msgWhats, setMsgWhats] = useState('');
   const [processando, setProcessando] = useState(false);
   const [pendenteSimulador, setPendenteSimulador] = useState(null);
   const [historicoChat, setHistoricoChat] = useState([
-    { autor: 'bot', texto: '👋 Olá! Sou o FinZap IA.\nEnvie um gasto como *"comprei lanche 35,00 no pix Itaú"* ou digite *"teste"*.' }
+    { autor: 'bot', texto: 'Olá! Sou o assistente financeiro FinZap.\nEnvie um gasto (ex: "comprei maçã 5,00 no débito") ou digite "teste".' }
   ]);
 
-  // ==========================================================================
-  // EFEITO 1: MONITORAMENTO DE AUTENTICAÇÃO
-  // ==========================================================================
+  const isMaster = user?.email?.toLowerCase() === MASTER_EMAIL.toLowerCase();
+
+// ============================================================================
+// ==================== FIM PARTE 1 DE 4 ======================================
+// ============================================================================
+// ============================================================================
+// ==================== INÍCIO PARTE 2 DE 4: LISTENERS E CRUD BÁSICO ==========
+// ============================================================================
+
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
+    const unsubscribe = onAuthStateChanged(auth, (usuarioAtual) => {
+      setUser(usuarioAtual);
       setCarregandoAuth(false);
     });
-    return () => unsub();
+    return () => unsubscribe();
   }, []);
 
-  // ==========================================================================
-  // EFEITO 2: LISTENERS DO FIRESTORE DO USUÁRIO LOGADO
-  // ==========================================================================
   useEffect(() => {
     if (!user) return;
 
-    // 1. Documento principal do usuário (Assinatura, WhatsApp, Categorias, Orçamentos)
     const userDocRef = doc(db, 'users', user.uid);
-    const unsubUser = onSnapshot(userDocRef, async (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
+    const unsubUser = onSnapshot(userDocRef, async (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
         setStatusAssinatura(data.status_assinatura || 'ATIVO');
         setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
         setWhatsappQrCode(data.whatsapp_qr || '');
-        if (data.categorias) setCategorias(data.categorias);
+        if (data.categorias && Array.isArray(data.categorias)) setCategorias(data.categorias);
         if (data.subcategorias) setSubcategorias(data.subcategorias);
         if (data.orcamentos) setOrcamentos(data.orcamentos);
       } else {
@@ -252,31 +230,29 @@ export default function App() {
           email: user.email,
           status_assinatura: 'ATIVO',
           whatsapp_status: 'DISCONNECTED',
+          categorias: CATEGORIAS_PADRAO,
+          subcategorias: SUBCATEGORIAS_PADRAO,
           criadoEm: serverTimestamp()
         }, { merge: true });
         setStatusAssinatura('ATIVO');
       }
     });
 
-    // 2. Transações
     const qTrans = query(collection(db, 'users', user.uid, 'transacoes'), orderBy('criadoEm', 'desc'));
-    const unsubTrans = onSnapshot(qTrans, (snap) => {
-      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setTransacoes(lista);
+    const unsubTrans = onSnapshot(qTrans, (snapshot) => {
+      setTransacoes(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    // 3. Cartões de Crédito
-    const unsubCartoes = onSnapshot(collection(db, 'users', user.uid, 'cartoes'), (snap) => {
-      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const unsubCartoes = onSnapshot(collection(db, 'users', user.uid, 'cartoes'), (snapshot) => {
+      const lista = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       setCartoes(lista);
       if (lista.length > 0) {
         setNovaCompraCartao(prev => ({ ...prev, cartaoNome: prev.cartaoNome || lista[0].nome }));
       }
     });
 
-    // 4. Bancos / Contas
-    const unsubBancos = onSnapshot(collection(db, 'users', user.uid, 'bancos'), async (snap) => {
-      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const unsubBancos = onSnapshot(collection(db, 'users', user.uid, 'bancos'), async (snapshot) => {
+      const lista = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       if (lista.length === 0) {
         await addDoc(collection(db, 'users', user.uid, 'bancos'), {
           nome: 'Itaú',
@@ -294,16 +270,14 @@ export default function App() {
       }
     });
 
-    // 5. Contas Fixas Recorrentes
-    const unsubFixas = onSnapshot(collection(db, 'users', user.uid, 'contas_fixas'), (snap) => {
-      setContasFixas(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    const unsubFixas = onSnapshot(collection(db, 'users', user.uid, 'contas_fixas'), (snapshot) => {
+      setContasFixas(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    // 6. Lista de Clientes se for Master
     let unsubAdmin = () => {};
-    if (user.email === MASTER_EMAIL) {
-      unsubAdmin = onSnapshot(collection(db, 'users'), (snap) => {
-        setClientesAdmin(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    if (isMaster) {
+      unsubAdmin = onSnapshot(collection(db, 'users'), (snapshot) => {
+        setClientesAdmin(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
       }, () => {});
     }
 
@@ -315,11 +289,8 @@ export default function App() {
       unsubFixas();
       unsubAdmin();
     };
-  }, [user]);
+  }, [user, isMaster]);
 
-  // ==========================================================================
-  // FUNÇÕES DE AUTENTICAÇÃO E WHATSAPP
-  // ==========================================================================
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
     setErroAuth('');
@@ -343,6 +314,7 @@ export default function App() {
   };
 
   const solicitarConexaoWhatsApp = async () => {
+    if (!user) return;
     setCarregandoQr(true);
     try {
       await fetch(`${RENDER_API_URL}/whatsapp/iniciar`, {
@@ -358,6 +330,7 @@ export default function App() {
   };
 
   const desconectarWhatsApp = async () => {
+    if (!user) return;
     try {
       await fetch(`${RENDER_API_URL}/whatsapp/desconectar`, {
         method: 'POST',
@@ -371,25 +344,23 @@ export default function App() {
   };
 
   const dispararTesteAlertaWhatsApp = async () => {
+    if (!user) return;
     try {
       await fetch(`${RENDER_API_URL}/whatsapp/testar-alerta`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
         body: JSON.stringify({ userId: user.uid })
       });
-      alert('Solicitação de alerta enviada para o seu WhatsApp!');
+      alert('Alerta de teste enviado para o servidor WhatsApp!');
     } catch (e) {
-      alert('Erro ao disparar teste de alerta.');
+      alert('Erro ao enviar alerta de teste.');
     }
   };
 
-  // ==========================================================================
-  // CRUD: CARTÕES, BANCOS, TRANSFERÊNCIAS E CONTAS AGENDADAS/FIXAS
-  // ==========================================================================
   const salvarCartao = async (e) => {
     e.preventDefault();
     if (!cartaoForm.nome || !user) return;
-    const payload = {
+    const dados = {
       nome: cartaoForm.nome.trim(),
       limite: Number(cartaoForm.limite || 0),
       diaFechamento: Number(cartaoForm.diaFechamento || 5),
@@ -397,40 +368,48 @@ export default function App() {
       banco: cartaoForm.banco.trim()
     };
     if (cartaoForm.id) {
-      await updateDoc(doc(db, 'users', user.uid, 'cartoes', cartaoForm.id), payload);
+      await updateDoc(doc(db, 'users', user.uid, 'cartoes', cartaoForm.id), dados);
     } else {
-      await addDoc(collection(db, 'users', user.uid, 'cartoes'), payload);
+      await addDoc(collection(db, 'users', user.uid, 'cartoes'), dados);
     }
     setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   };
 
-  const editarCartao = (c) => setCartaoForm({ id: c.id, nome: c.nome, limite: c.limite, diaFechamento: c.diaFechamento, diaVencimento: c.diaVencimento, banco: c.banco || '' });
-  const excluirCartao = (id) => { if (window.confirm('Excluir este cartão?')) deleteDoc(doc(db, 'users', user.uid, 'cartoes', id)); };
+  const editarCartao = (c) => setCartaoForm({ ...c });
+  const excluirCartao = (id) => {
+    if (window.confirm('Deseja remover este cartão?')) {
+      deleteDoc(doc(db, 'users', user.uid, 'cartoes', id));
+    }
+  };
 
   const salvarBanco = async (e) => {
     e.preventDefault();
     if (!bancoForm.nome || !user) return;
-    const payload = {
+    const dados = {
       nome: bancoForm.nome.trim(),
       tipo: bancoForm.tipo,
       saldoInicial: Number(bancoForm.saldoInicial || 0)
     };
     if (bancoForm.id) {
-      await updateDoc(doc(db, 'users', user.uid, 'bancos', bancoForm.id), payload);
+      await updateDoc(doc(db, 'users', user.uid, 'bancos', bancoForm.id), dados);
     } else {
-      await addDoc(collection(db, 'users', user.uid, 'bancos'), payload);
+      await addDoc(collection(db, 'users', user.uid, 'bancos'), dados);
     }
     setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
   };
 
-  const editarBanco = (b) => setBancoForm({ id: b.id, nome: b.nome, tipo: b.tipo, saldoInicial: b.saldoInicial || 0 });
-  const excluirBanco = (id) => { if (window.confirm('Excluir esta conta bancária?')) deleteDoc(doc(db, 'users', user.uid, 'bancos', id)); };
+  const editarBanco = (b) => setBancoForm({ ...b });
+  const excluirBanco = (id) => {
+    if (window.confirm('Deseja remover esta conta bancária?')) {
+      deleteDoc(doc(db, 'users', user.uid, 'bancos', id));
+    }
+  };
 
   const realizarTransferenciaEntreContas = async (e) => {
     e.preventDefault();
     const valorNum = parseFloat(formTransferencia.valor);
     if (!valorNum || valorNum <= 0 || formTransferencia.bancoOrigem === formTransferencia.bancoDestino) {
-      return alert('Selecione bancos diferentes e informe um valor válido.');
+      return alert('Selecione bancos diferentes e um valor válido.');
     }
 
     const batch = writeBatch(db);
@@ -438,7 +417,7 @@ export default function App() {
     const refEntrada = doc(collection(db, 'users', user.uid, 'transacoes'));
 
     batch.set(refSaida, {
-      descricao: `Transferência enviada para ${formTransferencia.bancoDestino}`,
+      descricao: `Transferência para ${formTransferencia.bancoDestino}`,
       valor: valorNum,
       tipo: 'DESPESA',
       metodo: 'TRANSFERENCIA',
@@ -452,7 +431,7 @@ export default function App() {
     });
 
     batch.set(refEntrada, {
-      descricao: `Transferência recebida de ${formTransferencia.bancoOrigem}`,
+      descricao: `Transferência de ${formTransferencia.bancoOrigem}`,
       valor: valorNum,
       tipo: 'RECEITA',
       metodo: 'TRANSFERENCIA',
@@ -467,7 +446,7 @@ export default function App() {
 
     await batch.commit();
     setFormTransferencia({ ...formTransferencia, valor: '' });
-    alert('Transferência concluída com sucesso!');
+    alert('Transferência realizada com sucesso!');
   };
 
   const lancarContaAgendada = async (e) => {
@@ -521,13 +500,21 @@ export default function App() {
 
     transacoes.forEach(t => {
       if (t.metodo === 'CREDITO' && t.cartao_nome && t.data_compra) {
-        const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
-        if (ciclo.anoMes !== t.anoMes || ciclo.data_vencimento !== t.data_vencimento) {
-          batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
-            anoMes: ciclo.anoMes,
-            data_vencimento: ciclo.data_vencimento
-          });
-          alterados++;
+        const cartao = cartoes.find(c => c.nome.toLowerCase() === t.cartao_nome.toLowerCase());
+        if (cartao) {
+          const calc = calcularDataFaturaCartao(
+            t.data_compra,
+            cartao.diaFechamento || 5,
+            cartao.diaVencimento || 12,
+            Number(t.parcela_atual || 1)
+          );
+          if (calc.anoMes !== t.anoMes || calc.dataVencimento !== t.data_vencimento) {
+            batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
+              anoMes: calc.anoMes,
+              data_vencimento: calc.dataVencimento
+            });
+            alterados++;
+          }
         }
       }
     });
@@ -555,6 +542,13 @@ export default function App() {
 
   const excluirContaFixa = (id) => deleteDoc(doc(db, 'users', user.uid, 'contas_fixas', id));
 
+// ============================================================================
+// ==================== FIM PARTE 2 DE 4 ======================================
+// ============================================================================
+// ============================================================================
+// ==================== INÍCIO PARTE 3 DE 4: FATURAS, EDIÇÃO E SIMULADOR ======
+// ============================================================================
+
   const pagarContaFixaRapido = async (conta) => {
     const diaStr = String(conta.diaVencimento || 10).padStart(2, '0');
     await addDoc(collection(db, 'users', user.uid, 'transacoes'), {
@@ -564,7 +558,7 @@ export default function App() {
       metodo: 'PIX',
       banco_nome: bancos[0]?.nome || 'Itaú',
       categoria: 'Contas',
-      subcategoria: 'Residencial',
+      subcategoria: 'Geral',
       pago: true,
       data_vencimento: `${filtroMesAno}-${diaStr}`,
       anoMes: filtroMesAno,
@@ -643,7 +637,6 @@ export default function App() {
     });
   };
 
-  // CORRIGIDO: Protegido contra data_vencimento / anoMes undefined no updateDoc
   const confirmarPagamentoFatura = async (e) => {
     e.preventDefault();
     if (!modalPagarFatura || !user) return;
@@ -1289,6 +1282,14 @@ export default function App() {
       if (data.invoiceUrl) setLinkPagamentoAsaas(data.invoiceUrl);
     } catch (e) { alert('Erro ao conectar com o sistema de pagamentos.'); } finally { setGerandoPix(false); }
   };
+
+// ============================================================================
+// ==================== FIM PARTE 3 DE 4 ======================================
+// ============================================================================
+// ============================================================================
+// ==================== INÍCIO PARTE 4 DE 4: CÁLCULOS E INTERFACE JSX =========
+// ============================================================================
+
   if (carregandoAuth) {
     return (
       <div className="min-h-screen bg-slate-950 text-emerald-400 flex items-center justify-center font-medium">
@@ -3240,3 +3241,7 @@ export default function App() {
     </div>
   );
 }
+
+// ============================================================================
+// ==================== FIM PARTE 4 DE 4 ======================================
+// ============================================================================
