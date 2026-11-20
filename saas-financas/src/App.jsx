@@ -1286,7 +1286,143 @@ export default function App() {
 // ============================================================================
 // ==================== FIM PARTE 3 DE 4 ======================================
 // ============================================================================
-/// ============================================================================
+// ============================================================================
+// ==================== SINCRONIZAÇÃO FIRESTORE (users/{user.uid}) ============
+// ============================================================================
+
+  useEffect(() => {
+    if (!user) return;
+
+    const userDocRef = doc(db, 'users', user.uid);
+
+    // 1. Escuta em tempo real o documento principal do usuário (arrays bancos, cartoes, etc.)
+    const unsubUserDoc = onSnapshot(userDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+
+        // Carrega arrays exatos do documento users/{uid}
+        setBancos(Array.isArray(data.bancos) ? data.bancos : []);
+        setCartoes(Array.isArray(data.cartoes) ? data.cartoes : []);
+        setContasFixas(Array.isArray(data.contas_fixas) ? data.contas_fixas : []);
+
+        if (Array.isArray(data.categorias) && data.categorias.length > 0) {
+          setCategorias(data.categorias);
+        }
+        if (data.subcategorias && typeof data.subcategorias === 'object') {
+          setSubcategorias(data.subcategorias);
+        }
+        if (data.orcamentos && typeof data.orcamentos === 'object') {
+          setOrcamentos(data.orcamentos);
+        }
+
+        // Verifica assinatura
+        if (data.status_assinatura) {
+          setStatusAssinatura(data.status_assinatura);
+        } else {
+          setStatusAssinatura('ATIVO');
+        }
+      } else {
+        setStatusAssinatura('INATIVO');
+      }
+    });
+
+    // 2. Escuta as transações (subcoleção users/{uid}/transacoes ou coleção raiz filtrada por uid)
+    const qTransacoesSub = collection(db, 'users', user.uid, 'transacoes');
+    const unsubTransacoes = onSnapshot(qTransacoesSub, (snap) => {
+      const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setTransacoes(lista);
+    });
+
+    return () => {
+      unsubUserDoc();
+      unsubTransacoes();
+    };
+  }, [user]);
+
+  // ==========================================================================
+  // FUNÇÕES DE SALVAMENTO DIRETO NOS ARRAYS DE users/{user.uid}
+  // ==========================================================================
+  const salvarCartao = async (e) => {
+    e.preventDefault();
+    if (!user || !cartaoForm.nome) return;
+
+    const userDocRef = doc(db, 'users', user.uid);
+    let novosCartoes = [...cartoes];
+
+    if (cartaoForm.id) {
+      novosCartoes = novosCartoes.map(c =>
+        c.id === cartaoForm.id
+          ? {
+              ...c,
+              nome: cartaoForm.nome.trim(),
+              limite: Number(cartaoForm.limite || 0),
+              diaFechamento: Number(cartaoForm.diaFechamento || 5),
+              diaVencimento: Number(cartaoForm.diaVencimento || 12),
+              banco: cartaoForm.banco.trim()
+            }
+          : c
+      );
+    } else {
+      novosCartoes.push({
+        id: String(Date.now()),
+        nome: cartaoForm.nome.trim(),
+        limite: Number(cartaoForm.limite || 0),
+        diaFechamento: Number(cartaoForm.diaFechamento || 5),
+        diaVencimento: Number(cartaoForm.diaVencimento || 12),
+        banco: cartaoForm.banco.trim()
+      });
+    }
+
+    await setDoc(userDocRef, { cartoes: novosCartoes }, { merge: true });
+    setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
+  };
+
+  const excluirCartao = async (idCartao) => {
+    if (!user || !window.confirm('Deseja excluir este cartão?')) return;
+    const userDocRef = doc(db, 'users', user.uid);
+    const novosCartoes = cartoes.filter(c => c.id !== idCartao);
+    await setDoc(userDocRef, { cartoes: novosCartoes }, { merge: true });
+  };
+
+  const salvarBanco = async (e) => {
+    e.preventDefault();
+    if (!user || !bancoForm.nome) return;
+
+    const userDocRef = doc(db, 'users', user.uid);
+    let novosBancos = [...bancos];
+
+    if (bancoForm.id) {
+      novosBancos = novosBancos.map(b =>
+        b.id === bancoForm.id
+          ? {
+              ...b,
+              nome: bancoForm.nome.trim(),
+              tipo: bancoForm.tipo,
+              saldoInicial: Number(bancoForm.saldoInicial || 0)
+            }
+          : b
+      );
+    } else {
+      novosBancos.push({
+        id: String(Date.now()),
+        nome: bancoForm.nome.trim(),
+        tipo: bancoForm.tipo,
+        saldoInicial: Number(bancoForm.saldoInicial || 0)
+      });
+    }
+
+    await setDoc(userDocRef, { bancos: novosBancos }, { merge: true });
+    setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
+  };
+
+  const excluirBanco = async (idBanco) => {
+    if (!user || !window.confirm('Deseja excluir esta conta bancária?')) return;
+    const userDocRef = doc(db, 'users', user.uid);
+    const novosBancos = bancos.filter(b => b.id !== idBanco);
+    await setDoc(userDocRef, { bancos: novosBancos }, { merge: true });
+  };
+
+// ============================================================================
 // ==================== INÍCIO PARTE 4 DE 4: CÁLCULOS E INTERFACE JSX =========
 // ============================================================================
 
@@ -1412,11 +1548,11 @@ export default function App() {
 
   const saldosPorBanco = bancos.map((b, index) => {
     const entradasBanco = transacoesComCicloCorrigido
-      .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
+      .filter(t => t.tipo === 'RECEITA' && t.pago !== false && (t.banco_nome?.trim().toLowerCase() === b.nome.trim().toLowerCase() || (!t.banco_nome && index === 0)))
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
     const saidasBanco = transacoesComCicloCorrigido
-      .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO' && (t.banco_nome?.toLowerCase() === b.nome.toLowerCase() || (!t.banco_nome && index === 0)))
+      .filter(t => t.tipo === 'DESPESA' && t.pago !== false && t.metodo !== 'CREDITO' && (t.banco_nome?.trim().toLowerCase() === b.nome.trim().toLowerCase() || (!t.banco_nome && index === 0)))
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
     const saldoAtualConta = Number(b.saldoInicial || 0) + entradasBanco - saidasBanco;
@@ -1433,20 +1569,18 @@ export default function App() {
 
   const resumoCartoes = cartoes.map(c => {
     const comprasCartaoMes = transacoesFiltradas.filter(
-      t => t.tipo === 'DESPESA' && t.metodo === 'CREDITO' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase()
+      t => t.tipo === 'DESPESA' && t.metodo === 'CREDITO' && t.cartao_nome?.trim().toLowerCase() === c.nome.trim().toLowerCase()
     );
 
-    // Valor em aberto da fatura do mês
     const faturaMes = comprasCartaoMes
       .filter(t => !t.fatura_paga)
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
-    // Total total da fatura no mês (mesmo se já foi quitada)
     const faturaTotalHistoricaMes = comprasCartaoMes
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
     const comprometidoTotal = transacoesComCicloCorrigido
-      .filter(t => t.tipo === 'DESPESA' && t.metodo === 'CREDITO' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
+      .filter(t => t.tipo === 'DESPESA' && t.metodo === 'CREDITO' && t.cartao_nome?.trim().toLowerCase() === c.nome.trim().toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
     const limite = Number(c.limite || 0);
@@ -1474,7 +1608,6 @@ export default function App() {
     };
   });
 
-  // Totais gerais consolidados de todos os cartões para o Resumo da aba Cartões
   const totaisGeraisCartoes = {
     limiteTotal: resumoCartoes.reduce((acc, c) => acc + Number(c.limite || 0), 0),
     faturasEmAbertoMes: resumoCartoes.reduce((acc, c) => acc + c.faturaMes, 0),
@@ -1482,13 +1615,12 @@ export default function App() {
     disponivelTotalGeral: resumoCartoes.reduce((acc, c) => acc + c.disponivel, 0)
   };
 
-  // Faturas consolidadas pela data exata de vencimento de cada cartão
   const faturasConsolidadasNoExtrato = resumoCartoes
     .filter(c => c.faturaTotalHistoricaMes > 0)
     .map(c => {
       const diaVencStr = c.dataVencimentoFatura.split('-')[2];
       return {
-        id: `fatura-${c.id}-${filtroMesAno}`,
+        id: `fatura-${c.id || c.nome}-${filtroMesAno}`,
         descricao: `Fatura Cartão ${c.nome} (Venc. dia ${diaVencStr})`,
         valor: c.faturaJaPaga ? c.faturaTotalHistoricaMes : c.faturaMes,
         tipo: 'FATURA_CARTAO',
@@ -1520,7 +1652,6 @@ export default function App() {
   const hojeZeroData = new Date(hojeIso + 'T00:00:00');
   const limite5Dias = new Date(hojeZeroData.getTime() + 5 * 24 * 60 * 60 * 1000);
 
-  // Lista unificada da aba "A Vencer & Receber" ordenada cronologicamente pelo vencimento
   const listaContasVencerReceber = [...transacoesFiltradas, ...faturasConsolidadasNoExtrato]
     .filter(t => {
       if (t.metodo === 'CREDITO' || t.metodo === 'TRANSFERENCIA' || t.metodo === 'PAGAMENTO_FATURA') return false;
@@ -1609,7 +1740,7 @@ export default function App() {
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
                 >
                   {saldosPorBanco.map(b => (
-                    <option key={b.id} value={b.nome}>{b.nome} (Saldo: R$ {b.saldoAtualConta.toFixed(2)})</option>
+                    <option key={b.id || b.nome} value={b.nome}>{b.nome} (Saldo: R$ {b.saldoAtualConta.toFixed(2)})</option>
                   ))}
                 </select>
               </div>
@@ -1684,7 +1815,7 @@ export default function App() {
                   className="w-full bg-slate-950 border border-emerald-500/40 rounded-xl px-3.5 py-2.5 text-sm text-slate-100"
                 >
                   {saldosPorBanco.map(b => (
-                    <option key={b.id} value={b.nome}>
+                    <option key={b.id || b.nome} value={b.nome}>
                       {b.nome} (Saldo atual: R$ {b.saldoAtualConta.toFixed(2)})
                     </option>
                   ))}
@@ -1810,7 +1941,7 @@ export default function App() {
                       onChange={e => setTransacaoEditando({ ...transacaoEditando, cartao_nome: e.target.value })}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
                     >
-                      {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
+                      {cartoes.map(c => <option key={c.id || c.nome} value={c.nome}>{c.nome}</option>)}
                     </select>
                   </div>
                 ) : (
@@ -1821,7 +1952,7 @@ export default function App() {
                       onChange={e => setTransacaoEditando({ ...transacaoEditando, banco_nome: e.target.value })}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
                     >
-                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                      {bancos.map(b => <option key={b.id || b.nome} value={b.nome}>{b.nome}</option>)}
                     </select>
                   </div>
                 )}
@@ -2090,7 +2221,7 @@ export default function App() {
 
           {/* BANNER DE ALERTA DE USO DO CHEQUE ESPECIAL */}
           {abaAtiva !== 'admin' && saldosPorBanco.filter(b => b.emChequeEspecial).map(b => (
-            <div key={b.id} className="p-4 rounded-2xl border bg-rose-500/15 border-rose-500/50 flex items-center justify-between gap-4 shadow-xl">
+            <div key={b.id || b.nome} className="p-4 rounded-2xl border bg-rose-500/15 border-rose-500/50 flex items-center justify-between gap-4 shadow-xl">
               <div className="flex items-center gap-3">
                 <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 animate-pulse" />
                 <div>
@@ -2110,7 +2241,7 @@ export default function App() {
 
           {/* BANNER DE ALERTA DE LIMITE DE CARTÃO DE CRÉDITO */}
           {abaAtiva !== 'admin' && resumoCartoes.filter(c => c.alerta80).map(c => (
-            <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between gap-4 shadow-xl ${c.estourado ? 'bg-rose-500/10 border-rose-500/40' : 'bg-amber-500/10 border-amber-500/30'}`}>
+            <div key={c.id || c.nome} className={`p-4 rounded-2xl border flex items-center justify-between gap-4 shadow-xl ${c.estourado ? 'bg-rose-500/10 border-rose-500/40' : 'bg-amber-500/10 border-amber-500/30'}`}>
               <div className="flex items-center gap-3">
                 <ShieldAlert className={`w-5 h-5 shrink-0 ${c.estourado ? 'text-rose-400' : 'text-amber-400'}`} />
                 <div>
@@ -2702,7 +2833,7 @@ export default function App() {
                       onChange={e => setFormTransferencia({ ...formTransferencia, bancoOrigem: e.target.value })}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                     >
-                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                      {bancos.map(b => <option key={b.id || b.nome} value={b.nome}>{b.nome}</option>)}
                     </select>
                   </div>
                   <div>
@@ -2712,7 +2843,7 @@ export default function App() {
                       onChange={e => setFormTransferencia({ ...formTransferencia, bancoDestino: e.target.value })}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                     >
-                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                      {bancos.map(b => <option key={b.id || b.nome} value={b.nome}>{b.nome}</option>)}
                     </select>
                   </div>
                   <div>
@@ -2734,7 +2865,7 @@ export default function App() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {saldosPorBanco.map(b => (
-                  <div key={b.id} className={`backdrop-blur-xl border p-5 rounded-2xl space-y-4 shadow-xl ${b.emChequeEspecial ? 'bg-rose-950/20 border-rose-500/50' : 'bg-slate-900/60 border-slate-800/80'}`}>
+                  <div key={b.id || b.nome} className={`backdrop-blur-xl border p-5 rounded-2xl space-y-4 shadow-xl ${b.emChequeEspecial ? 'bg-rose-950/20 border-rose-500/50' : 'bg-slate-900/60 border-slate-800/80'}`}>
                     <div className="flex justify-between items-start">
                       <div>
                         <span className="text-[10px] uppercase font-bold text-sky-400">{b.tipo}</span>
@@ -2784,7 +2915,6 @@ export default function App() {
           ================================================================ */}
           {abaAtiva === 'cartoes' && (
             <div className="space-y-6">
-              {/* CABEÇALHO E RESUMO GERAL DOS CARTÕES DE CRÉDITO */}
               <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-5 shadow-xl">
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                   <div>
@@ -2803,7 +2933,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* 4 CARDS DE RESUMO GERAL DOS CARTÕES */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
                     <span className="text-[10px] uppercase font-bold text-slate-400 block">Faturas em Aberto ({filtroMesAno})</span>
@@ -2832,10 +2961,9 @@ export default function App() {
                 </div>
               </div>
 
-              {/* CARDS INDIVIDUAIS DE RESUMO POR CARTÃO */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {resumoCartoes.map(c => (
-                  <div key={c.id} className={`p-5 rounded-2xl border space-y-4 shadow-xl transition ${c.estourado ? 'bg-rose-950/20 border-rose-500/40' : c.alerta80 ? 'bg-amber-950/15 border-amber-500/40' : 'bg-slate-900/60 border-slate-800/80'}`}>
+                  <div key={c.id || c.nome} className={`p-5 rounded-2xl border space-y-4 shadow-xl transition ${c.estourado ? 'bg-rose-950/20 border-rose-500/40' : c.alerta80 ? 'bg-amber-950/15 border-amber-500/40' : 'bg-slate-900/60 border-slate-800/80'}`}>
                     <div className="flex justify-between items-start">
                       <div>
                         <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">{c.banco || 'Cartão de Crédito'}</span>
@@ -2896,7 +3024,6 @@ export default function App() {
                 ))}
               </div>
 
-              {/* FORMULÁRIO DE LANÇAMENTO FLEXÍVEL */}
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-4 shadow-xl">
                 <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                   <Plus className="w-4 h-4 text-emerald-400" /> Lançar Compra (À Vista ou Parcelada)
@@ -2939,7 +3066,7 @@ export default function App() {
                       onChange={e => setNovaCompraCartao({ ...novaCompraCartao, cartaoNome: e.target.value })}
                       className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                     >
-                      {cartoes.map(c => <option key={c.id} value={c.nome}>{c.nome}</option>)}
+                      {cartoes.map(c => <option key={c.id || c.nome} value={c.nome}>{c.nome}</option>)}
                     </select>
                   ) : (
                     <select 
@@ -2947,7 +3074,7 @@ export default function App() {
                       onChange={e => setNovaCompraCartao({ ...novaCompraCartao, bancoNome: e.target.value })}
                       className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200"
                     >
-                      {bancos.map(b => <option key={b.id} value={b.nome}>{b.nome}</option>)}
+                      {bancos.map(b => <option key={b.id || b.nome} value={b.nome}>{b.nome}</option>)}
                     </select>
                   )}
 
@@ -2991,7 +3118,7 @@ export default function App() {
                     </button>
                     {cartoes.map(c => (
                       <button 
-                        key={c.id} onClick={() => setCartaoSelecionadoFatura(c.nome)}
+                        key={c.id || c.nome} onClick={() => setCartaoSelecionadoFatura(c.nome)}
                         className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${cartaoSelecionadoFatura === c.nome ? 'bg-emerald-500 text-slate-950' : 'bg-slate-950 text-slate-400 border border-slate-800'}`}
                       >
                         {c.nome}
@@ -3002,7 +3129,7 @@ export default function App() {
 
                 <div className="space-y-2.5">
                   {transacoesFiltradas
-                    .filter(t => t.metodo === 'CREDITO' && (cartaoSelecionadoFatura === 'TODOS' || t.cartao_nome?.toLowerCase() === cartaoSelecionadoFatura.toLowerCase()))
+                    .filter(t => t.metodo === 'CREDITO' && (cartaoSelecionadoFatura === 'TODOS' || t.cartao_nome?.trim().toLowerCase() === cartaoSelecionadoFatura.trim().toLowerCase()))
                     .map(t => (
                       <div key={t.id} className="flex items-center justify-between bg-slate-950/70 p-3.5 rounded-xl border border-slate-800/80">
                         <div>
@@ -3090,7 +3217,7 @@ export default function App() {
 
                 <div className="space-y-2.5">
                   {cartoes.map(c => (
-                    <div key={c.id} className="flex items-center justify-between bg-slate-950/70 border border-slate-800 px-4 py-3.5 rounded-xl">
+                    <div key={c.id || c.nome} className="flex items-center justify-between bg-slate-950/70 border border-slate-800 px-4 py-3.5 rounded-xl">
                       <div>
                         <p className="font-bold text-sm text-slate-100">{c.nome} <span className="text-xs font-normal text-slate-400">({c.banco || 'Crédito'})</span></p>
                         <p className="text-xs text-slate-400 mt-0.5">
@@ -3159,7 +3286,7 @@ export default function App() {
 
                 <div className="space-y-2.5">
                   {bancos.map(b => (
-                    <div key={b.id} className="flex items-center justify-between bg-slate-950/70 border border-slate-800 px-4 py-3.5 rounded-xl">
+                    <div key={b.id || b.nome} className="flex items-center justify-between bg-slate-950/70 border border-slate-800 px-4 py-3.5 rounded-xl">
                       <div>
                         <p className="font-bold text-sm text-slate-100">{b.nome}</p>
                         <p className="text-xs text-slate-400">{b.tipo} • Saldo Inicial: <strong>R$ {Number(b.saldoInicial || 0).toFixed(2)}</strong></p>
