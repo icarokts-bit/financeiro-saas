@@ -1286,7 +1286,7 @@ export default function App() {
 // ============================================================================
 // ==================== FIM PARTE 3 DE 4 ======================================
 // ============================================================================
-// ============================================================================
+/// ============================================================================
 // ==================== INÍCIO PARTE 4 DE 4: CÁLCULOS E INTERFACE JSX =========
 // ============================================================================
 
@@ -1379,7 +1379,7 @@ export default function App() {
   }
 
   // ==========================================================================
-  // CÁLCULOS GERAIS COM RECÁLCULO DINÂMICO DE CICLO DE FATURA
+  // CÁLCULOS GERAIS E CONSOLIDAÇÃO DE FATURAS POR DATA DE VENCIMENTO
   // ==========================================================================
   const transacoesComCicloCorrigido = transacoes.map(t => {
     const ciclo = obterCicloFaturaReal(t, cartoes, mesAtualStr);
@@ -1432,12 +1432,21 @@ export default function App() {
   const saldoTotalBancos = saldosPorBanco.reduce((acc, b) => acc + b.saldoAtualConta, 0);
 
   const resumoCartoes = cartoes.map(c => {
-    const faturaMes = transacoesFiltradas
-      .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga)
+    const comprasCartaoMes = transacoesFiltradas.filter(
+      t => t.tipo === 'DESPESA' && t.metodo === 'CREDITO' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase()
+    );
+
+    // Valor em aberto da fatura do mês
+    const faturaMes = comprasCartaoMes
+      .filter(t => !t.fatura_paga)
+      .reduce((acc, t) => acc + Number(t.valor || 0), 0);
+
+    // Total total da fatura no mês (mesmo se já foi quitada)
+    const faturaTotalHistoricaMes = comprasCartaoMes
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
     const comprometidoTotal = transacoesComCicloCorrigido
-      .filter(t => t.tipo === 'DESPESA' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
+      .filter(t => t.tipo === 'DESPESA' && t.metodo === 'CREDITO' && t.cartao_nome?.toLowerCase() === c.nome.toLowerCase() && !t.fatura_paga && t.anoMes >= mesAtualStr)
       .reduce((acc, t) => acc + Number(t.valor || 0), 0);
 
     const limite = Number(c.limite || 0);
@@ -1445,9 +1454,17 @@ export default function App() {
     const pctUso = limite > 0 ? Math.min(Math.round((comprometidoTotal / limite) * 100), 100) : 0;
     const isMelhorDiaHoje = diaHoje >= Number(c.diaFechamento || 5) && diaHoje < Number(c.diaVencimento || 12);
 
+    const diaVencAjustado = Math.min(Number(c.diaVencimento || 12), totalDiasNoMes);
+    const diaVencStr = String(diaVencAjustado).padStart(2, '0');
+    const dataVencimentoFatura = `${filtroMesAno}-${diaVencStr}`;
+
     return {
       ...c,
       faturaMes: Math.max(faturaMes, 0),
+      faturaTotalHistoricaMes: Math.max(faturaTotalHistoricaMes, 0),
+      faturaJaPaga: faturaTotalHistoricaMes > 0 && faturaMes <= 0,
+      dataVencimentoFatura,
+      qtdLancamentosMes: comprasCartaoMes.length,
       comprometidoTotal: Math.max(comprometidoTotal, 0),
       disponivel,
       pctUso: Math.max(pctUso, 0),
@@ -1457,22 +1474,32 @@ export default function App() {
     };
   });
 
+  // Totais gerais consolidados de todos os cartões para o Resumo da aba Cartões
+  const totaisGeraisCartoes = {
+    limiteTotal: resumoCartoes.reduce((acc, c) => acc + Number(c.limite || 0), 0),
+    faturasEmAbertoMes: resumoCartoes.reduce((acc, c) => acc + c.faturaMes, 0),
+    comprometidoTotalGeral: resumoCartoes.reduce((acc, c) => acc + c.comprometidoTotal, 0),
+    disponivelTotalGeral: resumoCartoes.reduce((acc, c) => acc + c.disponivel, 0)
+  };
+
+  // Faturas consolidadas pela data exata de vencimento de cada cartão
   const faturasConsolidadasNoExtrato = resumoCartoes
-    .filter(c => c.faturaMes > 0)
+    .filter(c => c.faturaTotalHistoricaMes > 0)
     .map(c => {
-      const diaVencStr = String(c.diaVencimento || 12).padStart(2, '0');
+      const diaVencStr = c.dataVencimentoFatura.split('-')[2];
       return {
         id: `fatura-${c.id}-${filtroMesAno}`,
-        descricao: `Fatura Consolidada Cartão ${c.nome} (Venc. ${diaVencStr}/${filtroMesAno.split('-')[1]})`,
-        valor: c.faturaMes,
+        descricao: `Fatura Cartão ${c.nome} (Venc. dia ${diaVencStr})`,
+        valor: c.faturaJaPaga ? c.faturaTotalHistoricaMes : c.faturaMes,
         tipo: 'FATURA_CARTAO',
         metodo: 'FATURA DO MÊS',
         cartao_nome: c.nome,
+        banco_nome: c.banco || 'Cartão de Crédito',
         categoria: 'Contas',
         subcategoria: 'Fatura Cartão',
-        data_vencimento: `${filtroMesAno}-${diaVencStr}`,
+        data_vencimento: c.dataVencimentoFatura,
         anoMes: filtroMesAno,
-        pago: false,
+        pago: c.faturaJaPaga,
         isLinhaFatura: true
       };
     });
@@ -1493,9 +1520,10 @@ export default function App() {
   const hojeZeroData = new Date(hojeIso + 'T00:00:00');
   const limite5Dias = new Date(hojeZeroData.getTime() + 5 * 24 * 60 * 60 * 1000);
 
+  // Lista unificada da aba "A Vencer & Receber" ordenada cronologicamente pelo vencimento
   const listaContasVencerReceber = [...transacoesFiltradas, ...faturasConsolidadasNoExtrato]
     .filter(t => {
-      if (t.metodo === 'CREDITO' || t.metodo === 'TRANSFERENCIA') return false;
+      if (t.metodo === 'CREDITO' || t.metodo === 'TRANSFERENCIA' || t.metodo === 'PAGAMENTO_FATURA') return false;
       if (filtroVencNome && !t.descricao?.toLowerCase().includes(filtroVencNome.toLowerCase())) return false;
       if (filtroVencCat !== 'TODAS' && t.categoria !== filtroVencCat) return false;
       if (filtroVencStatus === 'ABERTO' && t.pago !== false) return false;
@@ -2161,7 +2189,7 @@ export default function App() {
                     <p className="text-lg font-bold text-amber-400 mt-1">
                       R$ {(
                         transacoesFiltradas.filter(t => t.pago === false && t.tipo === 'DESPESA' && t.metodo !== 'CREDITO').reduce((a, b) => a + Number(b.valor || 0), 0) +
-                        faturasConsolidadasNoExtrato.reduce((a, b) => a + Number(b.valor || 0), 0)
+                        faturasConsolidadasNoExtrato.filter(f => !f.pago).reduce((a, b) => a + Number(b.valor || 0), 0)
                       ).toFixed(2)}
                     </p>
                     <button onClick={() => setAbaAtiva('vencimentos')} className="text-[11px] text-emerald-400 hover:underline mt-1.5 block">
@@ -2412,7 +2440,7 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 3: CONTAS A VENCER & A RECEBER
+              ABA 3: CONTAS A VENCER & A RECEBER (INCLUI FATURAS POR VENCIMENTO)
           ================================================================ */}
           {abaAtiva === 'vencimentos' && (
             <div className="space-y-6">
@@ -2420,10 +2448,10 @@ export default function App() {
                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                   <div>
                     <h2 className="text-lg font-bold flex items-center gap-2">
-                      <Clock className="w-5 h-5 text-amber-400" /> Lançar Conta a Vencer ou Valor a Receber
+                      <Clock className="w-5 h-5 text-amber-400" /> A Vencer & Receber ({filtroMesAno})
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Pelo WhatsApp envie: <em>"Água vence 25/10 valor 80,00"</em> ou dê baixa enviando <em>"paguei a água no pix Itaú"</em>.
+                      Contas agendadas, valores a receber e faturas de cartão ordenadas pela data de vencimento.
                     </p>
                   </div>
                   <div className="flex gap-2 flex-wrap">
@@ -2442,7 +2470,29 @@ export default function App() {
                   </div>
                 </div>
 
-                <form onSubmit={lancarContaAgendada} className="grid grid-cols-1 sm:grid-cols-6 gap-3">
+                {/* RESUMO RÁPIDO DA ABA A VENCER & RECEBER */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                  <div className="bg-slate-950/70 border border-slate-800 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-rose-400 block">Contas a Pagar (Em Aberto)</span>
+                    <strong className="text-base text-slate-100 mt-0.5 block">
+                      R$ {listaContasVencerReceber.filter(t => !t.pago && t.tipo === 'DESPESA' && !t.isLinhaFatura).reduce((a, b) => a + Number(b.valor || 0), 0).toFixed(2)}
+                    </strong>
+                  </div>
+                  <div className="bg-slate-950/70 border border-sky-500/30 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-sky-400 block">Faturas de Cartão (Em Aberto)</span>
+                    <strong className="text-base text-sky-300 mt-0.5 block">
+                      R$ {listaContasVencerReceber.filter(t => !t.pago && t.isLinhaFatura).reduce((a, b) => a + Number(b.valor || 0), 0).toFixed(2)}
+                    </strong>
+                  </div>
+                  <div className="bg-slate-950/70 border border-emerald-500/30 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-emerald-400 block">Valores a Receber (Em Aberto)</span>
+                    <strong className="text-base text-emerald-300 mt-0.5 block">
+                      R$ {listaContasVencerReceber.filter(t => !t.pago && t.tipo === 'RECEITA').reduce((a, b) => a + Number(b.valor || 0), 0).toFixed(2)}
+                    </strong>
+                  </div>
+                </div>
+
+                <form onSubmit={lancarContaAgendada} className="grid grid-cols-1 sm:grid-cols-6 gap-3 pt-2">
                   <input 
                     type="text" required placeholder="Descrição (ex: Conta de Água)" value={formAgendamento.descricao}
                     onChange={e => setFormAgendamento({ ...formAgendamento, descricao: e.target.value })}
@@ -2515,10 +2565,10 @@ export default function App() {
 
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl space-y-3 shadow-xl">
                 {listaContasVencerReceber.length === 0 ? (
-                  <p className="text-sm text-slate-500 py-8 text-center">Nenhuma conta encontrada para os filtros selecionados.</p>
+                  <p className="text-sm text-slate-500 py-8 text-center">Nenhuma conta ou fatura encontrada para os filtros selecionados.</p>
                 ) : (
                   listaContasVencerReceber.map(t => (
-                    <div key={t.id} className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${t.pago ? 'bg-emerald-950/10 border-emerald-500/20' : t.isLinhaFatura ? 'bg-sky-950/15 border-sky-500/30' : 'bg-slate-950/80 border-amber-500/30'}`}>
+                    <div key={t.id} className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${t.pago ? 'bg-emerald-950/10 border-emerald-500/20' : t.isLinhaFatura ? 'bg-sky-950/20 border-sky-500/40' : 'bg-slate-950/80 border-amber-500/30'}`}>
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${t.tipo === 'RECEITA' ? 'bg-emerald-500/20 text-emerald-300' : t.isLinhaFatura ? 'bg-sky-500/20 text-sky-300' : 'bg-rose-500/20 text-rose-300'}`}>
@@ -2533,14 +2583,19 @@ export default function App() {
                       </div>
 
                       <div className="flex items-center gap-3 self-end sm:self-center">
-                        <span className={`font-bold text-sm ${t.tipo === 'RECEITA' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        <span className={`font-bold text-sm ${t.tipo === 'RECEITA' ? 'text-emerald-400' : t.isLinhaFatura ? 'text-sky-300' : 'text-rose-400'}`}>
                           R$ {Number(t.valor || 0).toFixed(2)}
                         </span>
                         <button
                           onClick={() => {
                             if (t.isLinhaFatura) {
-                              const cartaoObj = resumoCartoes.find(c => c.nome === t.cartao_nome);
-                              if (cartaoObj) abrirModalPagamentoFatura(cartaoObj);
+                              if (t.pago) {
+                                setAbaAtiva('cartoes');
+                                setCartaoSelecionadoFatura(t.cartao_nome);
+                              } else {
+                                const cartaoObj = resumoCartoes.find(c => c.nome === t.cartao_nome);
+                                if (cartaoObj) abrirModalPagamentoFatura(cartaoObj);
+                              }
                             } else {
                               clicarDarBaixaConta(t);
                             }
@@ -2549,9 +2604,18 @@ export default function App() {
                             t.pago ? 'bg-slate-800 text-emerald-400 hover:bg-slate-700' : t.isLinhaFatura ? 'bg-sky-500 hover:bg-sky-400 text-slate-950' : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
                           }`}
                         >
-                          {t.pago ? <><CheckCircle2 className="w-3.5 h-3.5" /> Pago</> : t.isLinhaFatura ? <><CreditCard className="w-3.5 h-3.5" /> Pagar Fatura</> : <><Zap className="w-3.5 h-3.5" /> Dar Baixa</>}
+                          {t.pago ? <><CheckCircle2 className="w-3.5 h-3.5" /> {t.isLinhaFatura ? 'Fatura Paga' : 'Pago'}</> : t.isLinhaFatura ? <><CreditCard className="w-3.5 h-3.5" /> Pagar Fatura</> : <><Zap className="w-3.5 h-3.5" /> Dar Baixa</>}
                         </button>
                         
+                        {t.isLinhaFatura && (
+                          <button 
+                            onClick={() => { setAbaAtiva('cartoes'); setCartaoSelecionadoFatura(t.cartao_nome); }}
+                            className="text-xs bg-slate-800 hover:bg-slate-700 text-sky-300 px-2.5 py-1.5 rounded-xl font-medium"
+                            title="Ver compras desta fatura"
+                          >
+                            Detalhes
+                          </button>
+                        )}
                         {!t.isLinhaFatura && (
                           <button onClick={() => iniciarEdicaoTransacao(t)} className="text-slate-400 hover:text-sky-400 p-1"><Edit3 className="w-4 h-4" /></button>
                         )}
@@ -2716,30 +2780,75 @@ export default function App() {
           )}
 
           {/* ================================================================
-              ABA 5: CARTÃO DE CRÉDITO & LANÇAMENTOS FLEXÍVEIS
+              ABA 5: CARTÃO DE CRÉDITO & RESUMO CONSOLIDADO
           ================================================================ */}
           {abaAtiva === 'cartoes' && (
             <div className="space-y-6">
-              <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
-                <h2 className="text-lg font-bold flex items-center gap-2">
-                  <CreditCard className="w-5 h-5 text-emerald-400" /> Cartões de Crédito & Faturas ({filtroMesAno})
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Pague o valor total ou parcial escolhendo de qual banco debitar, acompanhe o melhor dia de compra e o limite real.
-                </p>
+              {/* CABEÇALHO E RESUMO GERAL DOS CARTÕES DE CRÉDITO */}
+              <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/20 backdrop-blur-xl border border-slate-800/80 p-6 rounded-2xl space-y-5 shadow-xl">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                      <CreditCard className="w-5 h-5 text-emerald-400" /> Resumo dos Cartões de Crédito ({filtroMesAno})
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Visão geral de faturas abertas, datas de fechamento/vencimento, limite comprometido (incluindo parcelas futuras) e limite livre.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setAbaAtiva('vencimentos')}
+                    className="text-xs bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 px-3.5 py-2 rounded-xl font-semibold transition whitespace-nowrap"
+                  >
+                    Ver Vencimentos →
+                  </button>
+                </div>
+
+                {/* 4 CARDS DE RESUMO GERAL DOS CARTÕES */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Faturas em Aberto ({filtroMesAno})</span>
+                    <strong className="text-lg text-rose-400 mt-0.5 block">
+                      R$ {totaisGeraisCartoes.faturasEmAbertoMes.toFixed(2)}
+                    </strong>
+                  </div>
+                  <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">Limite Total Somado</span>
+                    <strong className="text-lg text-slate-100 mt-0.5 block">
+                      R$ {totaisGeraisCartoes.limiteTotal.toFixed(2)}
+                    </strong>
+                  </div>
+                  <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-amber-400 block">Total Comprometido</span>
+                    <strong className="text-lg text-amber-300 mt-0.5 block">
+                      R$ {totaisGeraisCartoes.comprometidoTotalGeral.toFixed(2)}
+                    </strong>
+                  </div>
+                  <div className="bg-slate-950/80 border border-emerald-500/30 p-3.5 rounded-xl">
+                    <span className="text-[10px] uppercase font-bold text-emerald-400 block">Limite Disponível</span>
+                    <strong className={`text-lg mt-0.5 block ${totaisGeraisCartoes.disponivelTotalGeral >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      R$ {totaisGeraisCartoes.disponivelTotalGeral.toFixed(2)}
+                    </strong>
+                  </div>
+                </div>
               </div>
 
+              {/* CARDS INDIVIDUAIS DE RESUMO POR CARTÃO */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {resumoCartoes.map(c => (
                   <div key={c.id} className={`p-5 rounded-2xl border space-y-4 shadow-xl transition ${c.estourado ? 'bg-rose-950/20 border-rose-500/40' : c.alerta80 ? 'bg-amber-950/15 border-amber-500/40' : 'bg-slate-900/60 border-slate-800/80'}`}>
                     <div className="flex justify-between items-start">
                       <div>
                         <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">{c.banco || 'Cartão de Crédito'}</span>
-                        <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                        <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2 flex-wrap">
                           {c.nome}
                           {c.isMelhorDiaHoje && (
                             <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-semibold">
                               ⭐ Melhor Dia
+                            </span>
+                          )}
+                          {c.faturaJaPaga && (
+                            <span className="text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-semibold">
+                              ✅ Fatura Paga
                             </span>
                           )}
                         </h3>
@@ -2759,7 +2868,7 @@ export default function App() {
                       </div>
                       <div className="border-x border-slate-800">
                         <span className="block text-[10px] text-slate-400 uppercase">Vencimento</span>
-                        <strong className="text-xs text-amber-400">Dia {c.diaVencimento || 12}</strong>
+                        <strong className="text-xs text-amber-400">{formatarDataBR(c.dataVencimentoFatura)}</strong>
                       </div>
                       <div>
                         <span className="block text-[10px] text-emerald-400 uppercase font-semibold">Melhor Dia</span>
@@ -2769,7 +2878,7 @@ export default function App() {
 
                     <div className="space-y-2">
                       <div className="flex justify-between text-xs">
-                        <span className="text-slate-400">Fatura ({filtroMesAno}): <strong className="text-rose-400">R$ {c.faturaMes.toFixed(2)}</strong></span>
+                        <span className="text-slate-400">Fatura ({filtroMesAno}): <strong className="text-rose-400">R$ {c.faturaMes.toFixed(2)}</strong> <span className="text-[11px] text-slate-500">({c.qtdLancamentosMes} itens)</span></span>
                         <span className="text-slate-400">Disponível: <strong className="text-emerald-400">R$ {c.disponivel.toFixed(2)}</strong></span>
                       </div>
                       <div className="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
