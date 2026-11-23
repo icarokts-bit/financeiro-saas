@@ -6,6 +6,7 @@ import pino from 'pino';
 import admin from 'firebase-admin';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 // ============================================================================
 // 1. INICIALIZAÇÃO DO FIREBASE E EXPRESS
@@ -30,19 +31,60 @@ if (!fs.existsSync(AUTH_BASE_DIR)) {
   fs.mkdirSync(AUTH_BASE_DIR, { recursive: true });
 }
 
-// Middleware de Segurança (API Key)
-const validarApiKey = (req, res, next) => {
-  const chaveRecebida = req.headers['x-api-key'];
-  const chaveServidor = process.env.API_SECRET_KEY || 'FinZapKey2026';
-  
-  if (!chaveRecebida || chaveRecebida !== chaveServidor) {
-    return res.status(401).json({ error: 'Acesso negado. Chave de API inválida.' });
+// ============================================================================
+// SEGURANÇA
+// ============================================================================
+// Origens que podem chamar a API pelo navegador (o Asaas e o cron não passam por navegador).
+// Para liberar outro domínio, defina ALLOWED_ORIGINS no servidor (separado por vírgula).
+const ORIGENS_PERMITIDAS = (process.env.ALLOWED_ORIGINS || 'https://financeiro-saas-psi.vercel.app,http://localhost:5173')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ORIGENS_PERMITIDAS.includes(origin)) return callback(null, true);
+    return callback(new Error('Origem não permitida pelo CORS'));
+  },
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json({ limit: '100kb' }));
+
+// Comparação de segredos em tempo constante
+const compararSegredo = (recebido, esperado) => {
+  if (!recebido || !esperado) return false;
+  const a = Buffer.from(String(recebido));
+  const b = Buffer.from(String(esperado));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+// O site envia o token de login do Firebase; o servidor descobre QUEM é o usuário por ele
+// (nunca confia em userId vindo do corpo da requisição).
+const autenticarUsuario = async (req, res, next) => {
+  const cabecalho = req.headers.authorization || '';
+  const token = cabecalho.startsWith('Bearer ') ? cabecalho.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Login necessário.' });
+
+  try {
+    const decodificado = await admin.auth().verifyIdToken(token);
+    req.uid = decodificado.uid;
+    req.userEmail = decodificado.email || null;
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Sessão inválida ou expirada.' });
+  }
+};
+
+// Rotas internas (cron/manutenção): exigem um segredo configurado no servidor, sem valor padrão
+const validarChaveInterna = (req, res, next) => {
+  if (!process.env.CRON_SECRET) {
+    return res.status(503).json({ error: 'Rota desativada: CRON_SECRET não configurada.' });
+  }
+  if (!compararSegredo(req.headers['x-cron-key'], process.env.CRON_SECRET)) {
+    return res.status(401).json({ error: 'Acesso negado.' });
   }
   next();
 };
-
-app.use(cors());
-app.use(express.json());
 
 const sessions = new Map();
 const userJids = new Map();
@@ -98,16 +140,33 @@ async function enviarMensagemSegura(sock, remoteJid, conteudo) {
 // ============================================================================
 // ROTAS ASAAS, CONEXÃO E WEBHOOKS
 // ============================================================================
+let ultimaVerificacaoPorPing = 0;
 app.get('/', (req, res) => {
-  verificarAlertasVencimento(false).catch(() => {});
+  // Evita que chamadas públicas repetidas disparem leituras no banco sem parar
+  const agora = Date.now();
+  if (agora - ultimaVerificacaoPorPing > 5 * 60 * 1000) {
+    ultimaVerificacaoPorPing = agora;
+    verificarAlertasVencimento(false).catch(() => {});
+  }
   res.status(200).send('API FinZap Online');
 });
 
 const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://sandbox.asaas.com/api/v3';
 const ASAAS_API_KEY = process.env.ASAAS_API_KEY;
 
-app.post('/asaas/gerar-cobranca', validarApiKey, async (req, res) => {
-  const { userId, email, nome, valor } = req.body;
+// Preço da assinatura definido NO SERVIDOR (o site não decide quanto cobrar)
+const VALOR_PLANO = Number(process.env.PLANO_VALOR || 49.9);
+const STATUS_PAGAMENTO_OK = ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'];
+
+app.post('/asaas/gerar-cobranca', autenticarUsuario, async (req, res) => {
+  const userId = req.uid;
+  const email = req.userEmail;
+  const nome = typeof req.body?.nome === 'string' ? req.body.nome.slice(0, 100) : '';
+
+  if (!ASAAS_API_KEY) {
+    return res.status(503).json({ error: 'Pagamentos indisponíveis no momento.' });
+  }
+
   try {
     const clienteRes = await fetch(`${ASAAS_API_URL}/customers`, {
       method: 'POST',
@@ -115,6 +174,10 @@ app.post('/asaas/gerar-cobranca', validarApiKey, async (req, res) => {
       body: JSON.stringify({ name: nome || 'Cliente FinZap', email, externalReference: userId })
     });
     const cliente = await clienteRes.json();
+    if (!cliente.id) {
+      console.error('Asaas: falha ao criar cliente', cliente);
+      return res.status(502).json({ error: 'Erro ao gerar cobrança no Asaas' });
+    }
 
     const cobrancaRes = await fetch(`${ASAAS_API_URL}/payments`, {
       method: 'POST',
@@ -122,44 +185,91 @@ app.post('/asaas/gerar-cobranca', validarApiKey, async (req, res) => {
       body: JSON.stringify({
         customer: cliente.id,
         billingType: 'PIX',
-        value: valor || 49.90, 
+        value: VALOR_PLANO,
         dueDate: new Date().toISOString().split('T')[0],
         description: 'Assinatura Mensal FinZap SaaS',
-        externalReference: userId 
+        externalReference: userId
       })
     });
-    
+
     const cobranca = await cobrancaRes.json();
+    if (!cobranca.invoiceUrl) {
+      console.error('Asaas: falha ao criar cobrança', cobranca);
+      return res.status(502).json({ error: 'Erro ao gerar cobrança no Asaas' });
+    }
     res.json({ invoiceUrl: cobranca.invoiceUrl, id: cobranca.id });
   } catch (error) {
+    console.error('Erro em /asaas/gerar-cobranca:', error);
     res.status(500).json({ error: 'Erro ao gerar cobrança no Asaas' });
   }
 });
 
 app.post('/webhook/asaas', async (req, res) => {
-  const { event, payment } = req.body;
-  if (event === 'PAYMENT_RECEIVED' || event === 'PAYMENT_CONFIRMED') {
-    const userId = payment.externalReference; 
-    if (userId) {
-      const validade = new Date();
-      validade.setDate(validade.getDate() + 30);
-      await db.collection('users').doc(userId).set({
-        status_assinatura: 'ATIVO',
-        plano_validade: validade.toISOString().split('T')[0]
-      }, { merge: true });
-    }
+  // 1) Só o Asaas conhece este token (configure o mesmo valor no painel do Asaas, em Webhooks)
+  if (!process.env.ASAAS_WEBHOOK_TOKEN) {
+    console.error('❌ ASAAS_WEBHOOK_TOKEN não configurado: webhook recusado.');
+    return res.status(503).send('Webhook indisponível');
   }
-  res.status(200).send('Webhook processado com sucesso');
+  if (!compararSegredo(req.headers['asaas-access-token'], process.env.ASAAS_WEBHOOK_TOKEN)) {
+    return res.status(401).send('Não autorizado');
+  }
+
+  try {
+    const { event, payment } = req.body || {};
+
+    if ((event === 'PAYMENT_RECEIVED' || event === 'PAYMENT_CONFIRMED') && payment?.id) {
+      // 2) Não confia no corpo do webhook: confirma o pagamento direto na API do Asaas
+      const confirmRes = await fetch(`${ASAAS_API_URL}/payments/${encodeURIComponent(payment.id)}`, {
+        headers: { 'access_token': ASAAS_API_KEY }
+      });
+      if (!confirmRes.ok) {
+        console.error('Asaas: não foi possível confirmar o pagamento', payment.id, confirmRes.status);
+        return res.status(502).send('Falha ao confirmar pagamento');
+      }
+      const pagamento = await confirmRes.json();
+
+      const userId = pagamento.externalReference;
+      const statusOk = STATUS_PAGAMENTO_OK.includes(pagamento.status);
+      const valorOk = Number(pagamento.value) >= VALOR_PLANO;
+
+      if (userId && statusOk && valorOk) {
+        const userRef = db.collection('users').doc(userId);
+        const userSnap = await userRef.get();
+        if (userSnap.exists) {
+          const validade = new Date();
+          validade.setDate(validade.getDate() + 30);
+          await userRef.set({
+            status_assinatura: 'ATIVO',
+            plano_validade: validade.toISOString().split('T')[0],
+            ultimo_pagamento_id: pagamento.id
+          }, { merge: true });
+        }
+      } else {
+        console.warn('Webhook Asaas ignorado (dados não conferem):', pagamento.id, pagamento.status);
+      }
+    }
+
+    res.status(200).send('Webhook processado com sucesso');
+  } catch (error) {
+    console.error('Erro no webhook do Asaas:', error);
+    res.status(500).send('Erro ao processar webhook');
+  }
 });
 
-app.get('/verificar-alertas', validarApiKey, async (req, res) => {
+// Dispara para TODOS os usuários: só para uso interno (cron), nunca pelo navegador
+app.get('/verificar-alertas', validarChaveInterna, async (req, res) => {
   await verificarAlertasVencimento(true);
   res.status(200).send('OK - Alertas verificados');
 });
 
-app.post('/conectar', validarApiKey, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
+// Teste de alerta: só para o próprio usuário logado
+app.post('/whatsapp/testar-alerta', autenticarUsuario, async (req, res) => {
+  await verificarAlertasVencimento(true, req.uid);
+  res.json({ ok: true });
+});
+
+app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, async (req, res) => {
+  const userId = req.uid;
 
   try {
     const sockAntigo = sessions.get(userId);
@@ -177,9 +287,8 @@ app.post('/conectar', validarApiKey, async (req, res) => {
   }
 });
 
-app.post('/desconectar', validarApiKey, async (req, res) => {
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId é obrigatório' });
+app.post(['/desconectar', '/whatsapp/desconectar'], autenticarUsuario, async (req, res) => {
+  const userId = req.uid;
 
   const sock = sessions.get(userId);
   if (sock) {
@@ -336,7 +445,7 @@ async function startWhatsAppForUser(userId) {
 // ============================================================================
 // 3. ALERTA AUTOMÁTICO NO WHATSAPP
 // ============================================================================
-async function verificarAlertasVencimento(forcarDisparoManual = false) {
+async function verificarAlertasVencimento(forcarDisparoManual = false, apenasUserId = null) {
   try {
     const agora = new Date();
     const brTime = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
@@ -347,11 +456,18 @@ async function verificarAlertasVencimento(forcarDisparoManual = false) {
 
     if (!forcarDisparoManual && horaAtual < 8) return;
 
-    const usersSnap = await db.collection('users')
-      .where('whatsapp_status', '==', 'CONNECTED')
-      .get();
+    let docsUsuarios;
+    if (apenasUserId) {
+      const unico = await db.collection('users').doc(apenasUserId).get();
+      docsUsuarios = unico.exists && unico.data().whatsapp_status === 'CONNECTED' ? [unico] : [];
+    } else {
+      const usersSnap = await db.collection('users')
+        .where('whatsapp_status', '==', 'CONNECTED')
+        .get();
+      docsUsuarios = usersSnap.docs;
+    }
 
-    for (const userDoc of usersSnap.docs) {
+    for (const userDoc of docsUsuarios) {
       const userId = userDoc.id;
       const userData = userDoc.data();
 
@@ -1190,6 +1306,14 @@ async function restaurarSessoesAtivas() {
     console.error('Erro ao restaurar sessões ativas:', err);
   }
 }
+
+app.use((err, req, res, next) => {
+  if (err?.message === 'Origem não permitida pelo CORS') {
+    return res.status(403).json({ error: 'Origem não permitida.' });
+  }
+  console.error('Erro não tratado:', err);
+  res.status(500).json({ error: 'Erro interno.' });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {

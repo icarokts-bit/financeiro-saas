@@ -25,7 +25,18 @@ import {
 import { db, auth } from './firebaseConfig';
 
 const RENDER_API_URL = import.meta.env.VITE_RENDER_API_URL || 'https://sua-api.onrender.com';
-const API_SECRET_KEY = import.meta.env.VITE_API_SECRET_KEY || 'SUA_CHAVE_SECRETA';
+
+// Chama o backend enviando o token de login do Firebase: é ele que identifica o usuário no servidor
+const chamarApi = async (caminho, corpo = {}) => {
+  const usuarioLogado = auth.currentUser;
+  if (!usuarioLogado) throw new Error('Usuário não autenticado');
+  const token = await usuarioLogado.getIdToken();
+  return fetch(`${RENDER_API_URL}${caminho}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(corpo)
+  });
+};
 const MASTER_EMAIL = 'icaro.kts@gmail.com';
 
 const CORES_GRAFICO = ['#10b981', '#3b82f6', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#f43f5e'];
@@ -308,11 +319,8 @@ export default function App() {
     if (!user) return;
     setCarregandoQr(true);
     try {
-      await fetch(`${RENDER_API_URL}/whatsapp/iniciar`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
-        body: JSON.stringify({ userId: user.uid })
-      });
+      const res = await chamarApi('/whatsapp/iniciar');
+      if (!res.ok) throw new Error('Falha ao iniciar conexão');
     } catch (e) {
       alert('Erro ao solicitar QR Code ao servidor.');
     } finally {
@@ -323,11 +331,8 @@ export default function App() {
   const desconectarWhatsApp = async () => {
     if (!user) return;
     try {
-      await fetch(`${RENDER_API_URL}/whatsapp/desconectar`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
-        body: JSON.stringify({ userId: user.uid })
-      });
+      const res = await chamarApi('/whatsapp/desconectar');
+      if (!res.ok) throw new Error('Falha ao desconectar');
       await updateDoc(doc(db, 'users', user.uid), { whatsapp_status: 'DISCONNECTED', whatsapp_qr: '' });
     } catch (e) {
       alert('Erro ao desconectar WhatsApp.');
@@ -337,11 +342,8 @@ export default function App() {
   const dispararTesteAlertaWhatsApp = async () => {
     if (!user) return;
     try {
-      await fetch(`${RENDER_API_URL}/whatsapp/testar-alerta`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
-        body: JSON.stringify({ userId: user.uid })
-      });
+      const res = await chamarApi('/whatsapp/testar-alerta');
+      if (!res.ok) throw new Error('Falha ao enviar alerta de teste');
       alert('Alerta de teste enviado para o servidor WhatsApp!');
     } catch (e) {
       alert('Erro ao enviar alerta de teste.');
@@ -1325,11 +1327,7 @@ export default function App() {
   const assinarPlanoPro = async () => {
     setGerandoPix(true);
     try {
-      const res = await fetch(`${RENDER_API_URL}/asaas/gerar-cobranca`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_SECRET_KEY },
-        body: JSON.stringify({ userId: user.uid, email: user.email, valor: 49.90 })
-      });
+      const res = await chamarApi('/asaas/gerar-cobranca');
       const data = await res.json();
       if (data.invoiceUrl) setLinkPagamentoAsaas(data.invoiceUrl);
     } catch (e) { alert('Erro ao conectar com o sistema de pagamentos.'); } finally { setGerandoPix(false); }
