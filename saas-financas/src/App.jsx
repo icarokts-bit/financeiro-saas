@@ -45,6 +45,13 @@ const SUBCATEGORIAS_PADRAO = {
   'Outros': ['Geral']
 };
 
+// Garante que cada item dos arrays (bancos, cartoes, contas_fixas) tenha um id estável
+const comId = (lista) =>
+  (Array.isArray(lista) ? lista : []).map((item, i) => ({
+    ...item,
+    id: item.id || item.nome || `item_${i}`
+  }));
+
 const formatarDataBR = (dataIso) => {
   if (!dataIso) return '';
   const partes = dataIso.split('-');
@@ -243,37 +250,6 @@ export default function App() {
       setTransacoes(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    const unsubCartoes = onSnapshot(collection(db, 'users', user.uid, 'cartoes'), (snapshot) => {
-      const lista = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      setCartoes(lista);
-      if (lista.length > 0) {
-        setNovaCompraCartao(prev => ({ ...prev, cartaoNome: prev.cartaoNome || lista[0].nome }));
-      }
-    });
-
-    const unsubBancos = onSnapshot(collection(db, 'users', user.uid, 'bancos'), async (snapshot) => {
-      const lista = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      if (lista.length === 0) {
-        await addDoc(collection(db, 'users', user.uid, 'bancos'), {
-          nome: 'Itaú',
-          tipo: 'Conta Corrente / Débito',
-          saldoInicial: 0
-        });
-      } else {
-        setBancos(lista);
-        setNovaCompraCartao(prev => ({ ...prev, bancoNome: prev.bancoNome || lista[0].nome }));
-        setFormTransferencia(prev => ({
-          ...prev,
-          bancoOrigem: prev.bancoOrigem || lista[0].nome,
-          bancoDestino: prev.bancoDestino || (lista[1]?.nome || lista[0].nome)
-        }));
-      }
-    });
-
-    const unsubFixas = onSnapshot(collection(db, 'users', user.uid, 'contas_fixas'), (snapshot) => {
-      setContasFixas(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-
     let unsubAdmin = () => {};
     if (isMaster) {
       unsubAdmin = onSnapshot(collection(db, 'users'), (snapshot) => {
@@ -284,12 +260,26 @@ export default function App() {
     return () => {
       unsubUser();
       unsubTrans();
-      unsubCartoes();
-      unsubBancos();
-      unsubFixas();
       unsubAdmin();
     };
   }, [user, isMaster]);
+
+  useEffect(() => {
+    if (cartoes.length > 0) {
+      setNovaCompraCartao(prev => ({ ...prev, cartaoNome: prev.cartaoNome || cartoes[0].nome }));
+    }
+  }, [cartoes]);
+
+  useEffect(() => {
+    if (bancos.length > 0) {
+      setNovaCompraCartao(prev => ({ ...prev, bancoNome: prev.bancoNome || bancos[0].nome }));
+      setFormTransferencia(prev => ({
+        ...prev,
+        bancoOrigem: prev.bancoOrigem || bancos[0].nome,
+        bancoDestino: prev.bancoDestino || (bancos[1]?.nome || bancos[0].nome)
+      }));
+    }
+  }, [bancos]);
 
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
@@ -365,20 +355,19 @@ export default function App() {
       limite: Number(cartaoForm.limite || 0),
       diaFechamento: Number(cartaoForm.diaFechamento || 5),
       diaVencimento: Number(cartaoForm.diaVencimento || 12),
-      banco: cartaoForm.banco.trim()
+      banco: (cartaoForm.banco || '').trim()
     };
-    if (cartaoForm.id) {
-      await updateDoc(doc(db, 'users', user.uid, 'cartoes', cartaoForm.id), dados);
-    } else {
-      await addDoc(collection(db, 'users', user.uid, 'cartoes'), dados);
-    }
+    const lista = cartaoForm.id
+      ? cartoes.map(c => (c.id === cartaoForm.id ? { ...c, ...dados, id: c.id } : c))
+      : [...cartoes, { ...dados, id: String(Date.now()) }];
+    await setDoc(doc(db, 'users', user.uid), { cartoes: lista }, { merge: true });
     setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   };
 
   const editarCartao = (c) => setCartaoForm({ ...c });
-  const excluirCartao = (id) => {
+  const excluirCartao = async (id) => {
     if (window.confirm('Deseja remover este cartão?')) {
-      deleteDoc(doc(db, 'users', user.uid, 'cartoes', id));
+      await setDoc(doc(db, 'users', user.uid), { cartoes: cartoes.filter(c => c.id !== id) }, { merge: true });
     }
   };
 
@@ -390,18 +379,17 @@ export default function App() {
       tipo: bancoForm.tipo,
       saldoInicial: Number(bancoForm.saldoInicial || 0)
     };
-    if (bancoForm.id) {
-      await updateDoc(doc(db, 'users', user.uid, 'bancos', bancoForm.id), dados);
-    } else {
-      await addDoc(collection(db, 'users', user.uid, 'bancos'), dados);
-    }
+    const lista = bancoForm.id
+      ? bancos.map(b => (b.id === bancoForm.id ? { ...b, ...dados, id: b.id } : b))
+      : [...bancos, { ...dados, id: String(Date.now()) }];
+    await setDoc(doc(db, 'users', user.uid), { bancos: lista }, { merge: true });
     setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
   };
 
   const editarBanco = (b) => setBancoForm({ ...b });
-  const excluirBanco = (id) => {
+  const excluirBanco = async (id) => {
     if (window.confirm('Deseja remover esta conta bancária?')) {
-      deleteDoc(doc(db, 'users', user.uid, 'bancos', id));
+      await setDoc(doc(db, 'users', user.uid), { bancos: bancos.filter(b => b.id !== id) }, { merge: true });
     }
   };
 
@@ -530,17 +518,20 @@ export default function App() {
   const adicionarContaFixa = async (e) => {
     e.preventDefault();
     if (!fixaNome || !fixaValor || !fixaDia || !user) return;
-    await addDoc(collection(db, 'users', user.uid, 'contas_fixas'), {
+    const nova = {
+      id: String(Date.now()),
       nome: fixaNome.trim(),
       valorPadrao: parseFloat(fixaValor),
       diaVencimento: Number(fixaDia)
-    });
+    };
+    await setDoc(doc(db, 'users', user.uid), { contas_fixas: [...contasFixas, nova] }, { merge: true });
     setFixaNome('');
     setFixaValor('');
     setFixaDia('');
   };
 
-  const excluirContaFixa = (id) => deleteDoc(doc(db, 'users', user.uid, 'contas_fixas', id));
+  const excluirContaFixa = (id) =>
+    setDoc(doc(db, 'users', user.uid), { contas_fixas: contasFixas.filter(cf => cf.id !== id) }, { merge: true });
 
 // ============================================================================
 // ==================== FIM PARTE 2 DE 4 ======================================
@@ -1299,9 +1290,9 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
 
-        setBancos(Array.isArray(data.bancos) ? data.bancos : []);
-        setCartoes(Array.isArray(data.cartoes) ? data.cartoes : []);
-        setContasFixas(Array.isArray(data.contas_fixas) ? data.contas_fixas : []);
+        setBancos(comId(data.bancos));
+        setCartoes(comId(data.cartoes));
+        setContasFixas(comId(data.contas_fixas));
 
         if (Array.isArray(data.categorias) && data.categorias.length > 0) {
           setCategorias(data.categorias);
