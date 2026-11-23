@@ -484,36 +484,65 @@ export default function App() {
 
   const recalcularFaturasBanco = async () => {
     if (!user) return;
-    const batch = writeBatch(db);
-    let alterados = 0;
+
+    const mudancas = [];
 
     transacoes.forEach(t => {
-      if (t.metodo === 'CREDITO' && t.cartao_nome && t.data_compra) {
-        const cartao = cartoes.find(c => c.nome.toLowerCase() === t.cartao_nome.toLowerCase());
-        if (cartao) {
-          const calc = calcularDataFaturaCartao(
-            t.data_compra,
-            cartao.diaFechamento || 5,
-            cartao.diaVencimento || 12,
-            Number(t.parcela_atual || 1)
-          );
-          if (calc.anoMes !== t.anoMes || calc.dataVencimento !== t.data_vencimento) {
-            batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
-              anoMes: calc.anoMes,
-              data_vencimento: calc.dataVencimento
-            });
-            alterados++;
-          }
-        }
+      // Só compras no crédito cuja fatura ainda não foi paga (faturas pagas ficam intactas)
+      if (t.metodo !== 'CREDITO' || !t.cartao_nome || t.fatura_paga) return;
+
+      const cartao = cartoes.find(
+        c => c.nome?.trim().toLowerCase() === t.cartao_nome.trim().toLowerCase()
+      );
+      if (!cartao) return;
+
+      // Data da compra: usa data_compra; nos lançamentos antigos (sem esse campo) usa a data de criação
+      let dataCompra = t.data_compra;
+      if (!dataCompra) {
+        const dt = t.criadoEm?.toDate ? t.criadoEm.toDate() : null;
+        if (!dt) return;
+        dataCompra = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+      }
+
+      const calc = calcularDataFaturaCartao(
+        dataCompra,
+        cartao.diaFechamento || 5,
+        cartao.diaVencimento || 12,
+        Number(t.parcela_atual || 1)
+      );
+
+      if (calc.anoMes !== t.anoMes || calc.dataVencimento !== t.data_vencimento) {
+        mudancas.push({ t, dataCompra, calc });
       }
     });
 
-    if (alterados > 0) {
-      await batch.commit();
-      alert(`${alterados} lançamento(s) de cartão sincronizados com o ciclo de fechamento!`);
-    } else {
-      alert('Todas as faturas já estão sincronizadas corretamente.');
+    if (mudancas.length === 0) {
+      return alert('Nenhum lançamento de cartão precisa de ajuste (faturas já pagas não são alteradas).');
     }
+
+    const exemplos = mudancas
+      .slice(0, 6)
+      .map(m => `• ${m.t.descricao} (compra em ${formatarDataBR(m.dataCompra)}): fatura ${m.t.anoMes} → ${m.calc.anoMes}`)
+      .join('\n');
+
+    const confirmou = window.confirm(
+      `${mudancas.length} lançamento(s) de cartão vão mudar de fatura:\n\n${exemplos}${mudancas.length > 6 ? '\n...' : ''}\n\nDeseja aplicar?`
+    );
+    if (!confirmou) return;
+
+    for (let i = 0; i < mudancas.length; i += 400) {
+      const batch = writeBatch(db);
+      mudancas.slice(i, i + 400).forEach(({ t, dataCompra, calc }) => {
+        batch.update(doc(db, 'users', user.uid, 'transacoes', t.id), {
+          data_compra: dataCompra,
+          anoMes: calc.anoMes,
+          data_vencimento: calc.dataVencimento
+        });
+      });
+      await batch.commit();
+    }
+
+    alert(`${mudancas.length} lançamento(s) de cartão atualizados com o ciclo de fechamento!`);
   };
 
   const adicionarContaFixa = async (e) => {
