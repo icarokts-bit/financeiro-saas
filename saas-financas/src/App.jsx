@@ -127,7 +127,8 @@ const classificarCategoriaLocal = (texto, isReceita, categorias, subcategorias) 
 export default function App() {
   const dataAtualObj = new Date();
   const mesAtualStr = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}`;
-  const hojeIso = dataAtualObj.toISOString().split('T')[0];
+  // Data local (não UTC): à noite o toISOString() já viraria o dia seguinte no Brasil
+  const hojeIso = `${dataAtualObj.getFullYear()}-${String(dataAtualObj.getMonth() + 1).padStart(2, '0')}-${String(dataAtualObj.getDate()).padStart(2, '0')}`;
   const diaHoje = dataAtualObj.getDate();
 
   // Autenticação & SaaS
@@ -703,7 +704,15 @@ export default function App() {
   };
 
   const iniciarEdicaoTransacao = (t) => {
-    setTransacaoEditando(t);
+    let dataCompra = t.data_compra;
+    if (!dataCompra && t.metodo === 'CREDITO') {
+      // Lançamentos antigos (ex.: vindos do WhatsApp) não têm data_compra: usa a data em que foram criados
+      const dtCriacao = t.criadoEm?.toDate ? t.criadoEm.toDate() : null;
+      dataCompra = dtCriacao
+        ? `${dtCriacao.getFullYear()}-${String(dtCriacao.getMonth() + 1).padStart(2, '0')}-${String(dtCriacao.getDate()).padStart(2, '0')}`
+        : hojeIso;
+    }
+    setTransacaoEditando({ ...t, data_compra: dataCompra });
     setAplicarFuturasEdicao(false);
   };
 
@@ -737,7 +746,29 @@ export default function App() {
       });
       await batch.commit();
     } else {
-      const dataVencNova = transacaoEditando.data_vencimento || hojeIso;
+      let dataVencNova = transacaoEditando.data_vencimento || hojeIso;
+      let anoMesNovo = dataVencNova.slice(0, 7);
+      const camposCredito = {};
+
+      if (transacaoEditando.metodo === 'CREDITO') {
+        // No crédito, a data editada é a DATA DA COMPRA: a fatura depende do dia de fechamento do cartão
+        const cartaoEdit = cartoes.find(
+          c => c.nome?.trim().toLowerCase() === (transacaoEditando.cartao_nome || '').trim().toLowerCase()
+        );
+        const dataCompraNova = transacaoEditando.data_compra || transacaoEditando.data_vencimento || hojeIso;
+        if (cartaoEdit) {
+          const fatura = calcularDataFaturaCartao(
+            dataCompraNova,
+            cartaoEdit.diaFechamento || 5,
+            cartaoEdit.diaVencimento || 12,
+            Number(transacaoEditando.parcela_atual || 1)
+          );
+          dataVencNova = fatura.dataVencimento;
+          anoMesNovo = fatura.anoMes;
+        }
+        camposCredito.data_compra = dataCompraNova;
+      }
+
       await updateDoc(doc(db, 'users', user.uid, 'transacoes', transacaoEditando.id), {
         descricao: transacaoEditando.descricao,
         valor: Number(transacaoEditando.valor),
@@ -745,7 +776,8 @@ export default function App() {
         subcategoria: transacaoEditando.subcategoria || 'Geral',
         metodo: transacaoEditando.metodo,
         data_vencimento: dataVencNova,
-        anoMes: dataVencNova.slice(0, 7),
+        anoMes: anoMesNovo,
+        ...camposCredito,
         pago: Boolean(transacaoEditando.pago),
         banco_nome: transacaoEditando.banco_nome || null,
         cartao_nome: transacaoEditando.metodo === 'CREDITO' ? transacaoEditando.cartao_nome : null
@@ -1786,12 +1818,44 @@ export default function App() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-slate-400 block mb-1">Data / Vencimento</label>
-                  <input 
-                    type="date" value={transacaoEditando.data_vencimento || hojeIso} 
-                    onChange={e => setTransacaoEditando({ ...transacaoEditando, data_vencimento: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
-                  />
+                  {transacaoEditando.metodo === 'CREDITO' ? (() => {
+                    const cartaoEdit = cartoes.find(
+                      c => c.nome?.trim().toLowerCase() === (transacaoEditando.cartao_nome || '').trim().toLowerCase()
+                    );
+                    const dataCompraEdit = transacaoEditando.data_compra || transacaoEditando.data_vencimento || hojeIso;
+                    const previa = cartaoEdit
+                      ? calcularDataFaturaCartao(
+                          dataCompraEdit,
+                          cartaoEdit.diaFechamento || 5,
+                          cartaoEdit.diaVencimento || 12,
+                          Number(transacaoEditando.parcela_atual || 1)
+                        )
+                      : null;
+                    return (
+                      <>
+                        <label className="text-xs text-slate-400 block mb-1">Data da compra</label>
+                        <input
+                          type="date" value={dataCompraEdit}
+                          onChange={e => setTransacaoEditando({ ...transacaoEditando, data_compra: e.target.value })}
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                        />
+                        {previa && (
+                          <p className="text-[10px] text-emerald-400 mt-1">
+                            Fatura {previa.anoMes.split('-')[1]}/{previa.anoMes.split('-')[0]} · vence em {formatarDataBR(previa.dataVencimento)}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })() : (
+                    <>
+                      <label className="text-xs text-slate-400 block mb-1">Data / Vencimento</label>
+                      <input
+                        type="date" value={transacaoEditando.data_vencimento || hojeIso}
+                        onChange={e => setTransacaoEditando({ ...transacaoEditando, data_vencimento: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-200"
+                      />
+                    </>
+                  )}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
