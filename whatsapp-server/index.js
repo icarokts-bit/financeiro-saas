@@ -108,6 +108,8 @@ function limparPastaSessaoLocal(userId) {
 
 // Função matemática avançada para calcular o mês/dia correto da Fatura do Cartão
 const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, parcelaAtual = 1) => {
+  diaFechamento = Number(diaFechamento);
+  diaVencimento = Number(diaVencimento);
   const dataCompra = new Date(dataCompraIso + 'T12:00:00');
   let anoFatura = dataCompra.getFullYear();
   let mesFatura = dataCompra.getMonth(); 
@@ -160,6 +162,10 @@ const ASAAS_API_KEY = process.env.ASAAS_API_KEY;
 const MASTER_EMAIL = (process.env.MASTER_EMAIL || 'icaro.kts@gmail.com').toLowerCase();
 const DIAS_TESTE = Number(process.env.DIAS_TESTE || 14);
 const UM_DIA_MS = 24 * 60 * 60 * 1000;
+
+// Data de hoje (AAAA-MM-DD) no horário de Brasília. O servidor roda em UTC, e à noite
+// toISOString() já viraria o dia seguinte, jogando a compra na fatura errada.
+const hojeBR = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
 
 const temAcessoAtivo = (dados) => {
   const ate = dados?.acesso_ate?.toDate ? dados.acesso_ate.toDate() : null;
@@ -269,7 +275,7 @@ app.post('/asaas/gerar-cobranca', autenticarUsuario, async (req, res) => {
         customer: cliente.id,
         billingType: 'PIX',
         value: VALOR_PLANO,
-        dueDate: new Date().toISOString().split('T')[0],
+        dueDate: hojeBR(),
         description: 'Assinatura Mensal FinZap SaaS',
         externalReference: userId
       })
@@ -583,7 +589,7 @@ async function verificarAlertasVencimento(forcarDisparoManual = false, apenasUse
       const remoteJid = userJids.get(userId) || userData.whatsapp_jid;
       if (!sock || !remoteJid) continue;
 
-      const contasFixas = userData.contasFixas || [];
+      const contasFixas = userData.contas_fixas || userData.contasFixas || [];
       const cartoes = userData.cartoes || [];
 
       const snapTrans = await db.collection('users').doc(userId).collection('transacoes')
@@ -774,8 +780,7 @@ function classificarCategoriaESubcategoria(pLimpo, isReceita, categorias, subcat
 // 5. GRAVAÇÃO NO FIRESTORE COM GRUPO DE PARCELAS E DATAS AVANÇADAS
 // ============================================================================
 async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, anoMesPadrao, textoOriginal) {
-  const hoje = new Date();
-  const hojeStr = hoje.toISOString().split('T')[0];
+  const hojeStr = hojeBR();
   let respostas = [];
 
   const snapAll = await db.collection('users').doc(userId).collection('transacoes').get();
@@ -801,8 +806,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
     let mesVenc = dataReferencia.getMonth();
     let anoVenc = dataReferencia.getFullYear();
 
-    const dataHojeLocal = new Date();
-    if (dataReferencia < new Date(dataHojeLocal.getFullYear(), dataHojeLocal.getMonth(), dataHojeLocal.getDate()) && !isCredito) {
+    if (dataReferencia < new Date(hojeStr + 'T00:00:00') && !isCredito) {
       mesVenc += 1;
     }
 
@@ -841,6 +845,8 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         pago: statusPago,
         data_vencimento: dataVencItem,
         anoMes: anoMesItem,
+        // Data da compra no crédito: o site usa este campo para recalcular a fatura
+        ...(isCredito ? { data_compra: item.data_vencimento || hojeStr } : {}),
         origem: 'WHATSAPP_IA',
         mensagem_original: textoOriginal,
         criadoEm: admin.firestore.FieldValue.serverTimestamp()
@@ -1020,8 +1026,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
     const txtLimpo = semAcento(textoUsuario).trim().toLowerCase();
     const hoje = new Date();
-    const anoMesAtual = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
-    const hojeStr = hoje.toISOString().split('T')[0];
+    const hojeStr = hojeBR();
+    const anoMesAtual = hojeStr.slice(0, 7);
 
     if (/^(teste|ping|status)$/i.test(txtLimpo)) {
       await enviarMensagemSegura(sock, remoteJid, {

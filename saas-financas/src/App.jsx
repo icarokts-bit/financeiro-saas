@@ -87,6 +87,11 @@ const calcularDataFaturaCartao = (dataCompraIso, diaFechamento, diaVencimento, n
     mesFatura += 1;
   }
 
+  // Cartão que vence em dia menor que o fechamento (ex.: fecha dia 25, vence dia 5): vence no mês seguinte ao do fechamento
+  if (Number(diaVencimento) < Number(diaFechamento)) {
+    mesFatura += 1;
+  }
+
   mesFatura += (numParcela - 1);
 
   const dataVencObj = new Date(anoFatura, mesFatura, Number(diaVencimento));
