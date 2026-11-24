@@ -1,0 +1,53 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function dono(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    // Campos que SÓ o servidor (Admin SDK, que ignora estas regras) pode criar ou alterar
+    function camposDoServidor() {
+      return [
+        'email',
+        'status_assinatura',
+        'acesso_ate',
+        'plano_validade',
+        'ultimo_pagamento_id',
+        'whatsapp_status',
+        'whatsapp_qrcode',
+        'whatsapp_qr',
+        'whatsapp_jid',
+        'ultimo_alerta_data'
+      ];
+    }
+
+    // Acesso liberado = teste grátis ou assinatura ainda dentro da validade.
+    // O campo acesso_ate é gravado apenas pelo servidor.
+    function acessoAtivo(userId) {
+      let perfil = get(/databases/$(database)/documents/users/$(userId)).data;
+      return 'acesso_ate' in perfil && request.time < perfil.acesso_ate;
+    }
+
+    match /users/{userId} {
+      // O dono sempre consegue ler a própria conta (o site precisa disso para mostrar "teste acabou")
+      allow read: if dono(userId);
+
+      // Contas são criadas e apagadas só pelo servidor
+      allow create, delete: if false;
+
+      // Atualizar dados (bancos, cartões, categorias...) exige acesso ativo
+      // e não pode mexer nos campos controlados pelo servidor
+      allow update: if dono(userId)
+                    && acessoAtivo(userId)
+                    && !request.resource.data.diff(resource.data).affectedKeys().hasAny(camposDoServidor());
+
+      // Lançamentos e demais subcoleções: só o dono e só com acesso ativo
+      match /{subcollection=**} {
+        allow read, write: if dono(userId) && acessoAtivo(userId);
+      }
+    }
+
+    // Todo o resto é bloqueado por padrão (nenhuma outra regra libera)
+  }
+}

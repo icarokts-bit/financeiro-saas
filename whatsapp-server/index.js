@@ -154,6 +154,89 @@ app.get('/', (req, res) => {
 const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://sandbox.asaas.com/api/v3';
 const ASAAS_API_KEY = process.env.ASAAS_API_KEY;
 
+// ============================================================================
+// CONTAS: TESTE GRÁTIS, ASSINATURA E PAINEL MASTER (tudo definido NO SERVIDOR)
+// ============================================================================
+const MASTER_EMAIL = (process.env.MASTER_EMAIL || 'icaro.kts@gmail.com').toLowerCase();
+const DIAS_TESTE = Number(process.env.DIAS_TESTE || 14);
+const UM_DIA_MS = 24 * 60 * 60 * 1000;
+
+const temAcessoAtivo = (dados) => {
+  const ate = dados?.acesso_ate?.toDate ? dados.acesso_ate.toDate() : null;
+  return !!ate && ate.getTime() > Date.now();
+};
+
+const verificarAcessoAtivo = async (userId) => {
+  const snap = await db.collection('users').doc(userId).get();
+  return snap.exists && temAcessoAtivo(snap.data());
+};
+
+// Chamada pelo site no primeiro login (e em contas antigas sem período definido):
+// cria a conta com o teste grátis. O navegador não consegue gravar esses campos (regras do Firestore).
+app.post('/conta/iniciar', autenticarUsuario, async (req, res) => {
+  try {
+    const userRef = db.collection('users').doc(req.uid);
+    const snap = await userRef.get();
+    const dados = snap.exists ? snap.data() : {};
+
+    if (dados.acesso_ate) return res.json({ ok: true, criada: false });
+
+    const ehMaster = !!req.userEmail && req.userEmail.toLowerCase() === MASTER_EMAIL;
+    let status = 'TESTE';
+    let acessoAte = new Date(Date.now() + DIAS_TESTE * UM_DIA_MS);
+
+    if (ehMaster) {
+      status = 'ATIVO';
+      acessoAte = new Date(Date.now() + 50 * 365 * UM_DIA_MS);
+    } else if (dados.plano_validade) {
+      // Conta antiga que já tinha pago: respeita a validade que já existia
+      const validade = new Date(`${dados.plano_validade}T23:59:59-03:00`);
+      if (validade.getTime() > Date.now()) {
+        status = 'ATIVO';
+        acessoAte = validade;
+      }
+    }
+
+    await userRef.set({
+      email: req.userEmail,
+      status_assinatura: status,
+      acesso_ate: admin.firestore.Timestamp.fromDate(acessoAte),
+      ...(dados.whatsapp_status ? {} : { whatsapp_status: 'DISCONNECTED' }),
+      ...(snap.exists ? {} : { criadoEm: admin.firestore.FieldValue.serverTimestamp() })
+    }, { merge: true });
+
+    res.json({ ok: true, criada: !snap.exists });
+  } catch (error) {
+    console.error('Erro em /conta/iniciar:', error);
+    res.status(500).json({ error: 'Erro ao iniciar a conta.' });
+  }
+});
+
+// Lista de clientes para o painel master: só o servidor lê todos os usuários e só devolve dados de conta
+app.post('/admin/clientes', autenticarUsuario, async (req, res) => {
+  if (!req.userEmail || req.userEmail.toLowerCase() !== MASTER_EMAIL) {
+    return res.status(403).json({ error: 'Acesso negado.' });
+  }
+  try {
+    const snap = await db.collection('users').limit(500).get();
+    const clientes = snap.docs.map(d => {
+      const x = d.data();
+      return {
+        id: d.id,
+        email: x.email || null,
+        status_assinatura: x.status_assinatura || null,
+        plano_validade: x.plano_validade || null,
+        acesso_ate: x.acesso_ate?.toDate ? x.acesso_ate.toDate().toISOString() : null,
+        whatsapp_status: x.whatsapp_status || null
+      };
+    });
+    res.json({ clientes });
+  } catch (error) {
+    console.error('Erro em /admin/clientes:', error);
+    res.status(500).json({ error: 'Erro ao listar clientes.' });
+  }
+});
+
 // Preço da assinatura definido NO SERVIDOR (o site não decide quanto cobrar)
 const VALOR_PLANO = Number(process.env.PLANO_VALOR || 49.9);
 const STATUS_PAGAMENTO_OK = ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'];
@@ -234,16 +317,26 @@ app.post('/webhook/asaas', async (req, res) => {
 
       if (userId && statusOk && valorOk) {
         const userRef = db.collection('users').doc(userId);
-        const userSnap = await userRef.get();
-        if (userSnap.exists) {
-          const validade = new Date();
-          validade.setDate(validade.getDate() + 30);
-          await userRef.set({
+        await db.runTransaction(async (t) => {
+          const userSnap = await t.get(userRef);
+          if (!userSnap.exists) return;
+          const dados = userSnap.data();
+
+          // O Asaas pode avisar duas vezes o mesmo pagamento (confirmado e recebido): conta só uma vez
+          if (dados.ultimo_pagamento_id === pagamento.id) return;
+
+          // Soma 30 dias a partir do fim do acesso atual (se ainda válido) ou de hoje
+          const atual = dados.acesso_ate?.toDate ? dados.acesso_ate.toDate() : null;
+          const base = atual && atual.getTime() > Date.now() ? atual : new Date();
+          const novoFim = new Date(base.getTime() + 30 * UM_DIA_MS);
+
+          t.set(userRef, {
             status_assinatura: 'ATIVO',
-            plano_validade: validade.toISOString().split('T')[0],
+            acesso_ate: admin.firestore.Timestamp.fromDate(novoFim),
+            plano_validade: novoFim.toISOString().split('T')[0],
             ultimo_pagamento_id: pagamento.id
           }, { merge: true });
-        }
+        });
       } else {
         console.warn('Webhook Asaas ignorado (dados não conferem):', pagamento.id, pagamento.status);
       }
@@ -270,6 +363,9 @@ app.post('/whatsapp/testar-alerta', autenticarUsuario, async (req, res) => {
 
 app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, async (req, res) => {
   const userId = req.uid;
+  if (!(await verificarAcessoAtivo(userId))) {
+    return res.status(402).json({ error: 'Assinatura necessária para conectar o WhatsApp.' });
+  }
 
   try {
     const sockAntigo = sessions.get(userId);
@@ -434,6 +530,14 @@ async function startWhatsAppForUser(userId) {
       if (isChatComOutraPessoa || isOutroLid) return;
 
       userJids.set(userId, remoteJid);
+
+      if (!(await verificarAcessoAtivo(userId))) {
+        await sock.sendMessage(remoteJid, {
+          text: '⏳ Seu período de teste terminou. Assine o FinZap Pro no site para continuar lançando pelo WhatsApp.'
+        });
+        return;
+      }
+
       await processarMensagemInteligente(userId, texto, sock, remoteJid);
     });
 
@@ -466,6 +570,8 @@ async function verificarAlertasVencimento(forcarDisparoManual = false, apenasUse
         .get();
       docsUsuarios = usersSnap.docs;
     }
+
+    docsUsuarios = docsUsuarios.filter(d => temAcessoAtivo(d.data()));
 
     for (const userDoc of docsUsuarios) {
       const userId = userDoc.id;

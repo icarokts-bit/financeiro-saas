@@ -63,6 +63,14 @@ const comId = (lista) =>
     id: item.id || item.nome || `item_${i}`
   }));
 
+// O servidor grava status_assinatura e acesso_ate; o site só interpreta
+const calcularStatusAssinatura = (data) => {
+  const ate = data?.acesso_ate?.toDate ? data.acesso_ate.toDate() : null;
+  if (!ate) return 'VERIFICANDO';
+  if (ate.getTime() <= Date.now()) return 'EXPIRADO';
+  return data.status_assinatura === 'ATIVO' ? 'ATIVO' : 'TESTE';
+};
+
 const formatarDataBR = (dataIso) => {
   if (!dataIso) return '';
   const partes = dataIso.split('-');
@@ -150,6 +158,7 @@ export default function App() {
   const [senhaInput, setSenhaInput] = useState('');
   const [erroAuth, setErroAuth] = useState('');
   const [statusAssinatura, setStatusAssinatura] = useState('VERIFICANDO');
+  const [acessoAteMs, setAcessoAteMs] = useState(null);
   const [linkPagamentoAsaas, setLinkPagamentoAsaas] = useState('');
   const [gerandoPix, setGerandoPix] = useState(false);
 
@@ -236,24 +245,33 @@ export default function App() {
 
     const userDocRef = doc(db, 'users', user.uid);
     const unsubUser = onSnapshot(userDocRef, async (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setStatusAssinatura(data.status_assinatura || 'ATIVO');
-        setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
-        setWhatsappQrCode(data.whatsapp_qr || '');
-        if (data.categorias && Array.isArray(data.categorias)) setCategorias(data.categorias);
-        if (data.subcategorias) setSubcategorias(data.subcategorias);
-        if (data.orcamentos) setOrcamentos(data.orcamentos);
-      } else {
+      const data = docSnap.exists() ? docSnap.data() : null;
+
+      if (!data || !data.acesso_ate) {
+        // Conta nova (ou antiga, sem período definido): o servidor define o teste grátis de 14 dias
+        setStatusAssinatura('VERIFICANDO');
+        try {
+          await chamarApi('/conta/iniciar');
+        } catch (e) {
+          console.error('Erro ao iniciar a conta:', e);
+        }
+        return;
+      }
+
+      setStatusAssinatura(calcularStatusAssinatura(data));
+      setAcessoAteMs(data.acesso_ate.toDate().getTime());
+      setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
+      setWhatsappQrCode(data.whatsapp_qrcode || data.whatsapp_qr || '');
+      if (data.categorias && Array.isArray(data.categorias)) setCategorias(data.categorias);
+      if (data.subcategorias) setSubcategorias(data.subcategorias);
+      if (data.orcamentos) setOrcamentos(data.orcamentos);
+
+      // Contas novas ainda não têm categorias: grava as padrão (campos liberados pelas regras)
+      if (!Array.isArray(data.categorias)) {
         await setDoc(userDocRef, {
-          email: user.email,
-          status_assinatura: 'ATIVO',
-          whatsapp_status: 'DISCONNECTED',
           categorias: CATEGORIAS_PADRAO,
-          subcategorias: SUBCATEGORIAS_PADRAO,
-          criadoEm: serverTimestamp()
+          subcategorias: SUBCATEGORIAS_PADRAO
         }, { merge: true });
-        setStatusAssinatura('ATIVO');
       }
     });
 
@@ -262,19 +280,39 @@ export default function App() {
       setTransacoes(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     });
 
-    let unsubAdmin = () => {};
-    if (isMaster) {
-      unsubAdmin = onSnapshot(collection(db, 'users'), (snapshot) => {
-        setClientesAdmin(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-      }, () => {});
-    }
-
     return () => {
       unsubUser();
       unsubTrans();
-      unsubAdmin();
     };
-  }, [user, isMaster]);
+  }, [user]);
+
+  // Painel master: a lista de clientes vem do servidor (só o e-mail master consegue)
+  const carregarClientesAdmin = async () => {
+    try {
+      const res = await chamarApi('/admin/clientes');
+      if (!res.ok) throw new Error('Falha ao carregar clientes');
+      const dados = await res.json();
+      setClientesAdmin(dados.clientes || []);
+    } catch (e) {
+      setClientesAdmin([]);
+    }
+  };
+
+  useEffect(() => {
+    if (user && isMaster && abaAtiva === 'admin') carregarClientesAdmin();
+  }, [user, isMaster, abaAtiva]);
+
+  // Quando o teste/assinatura vence com o site aberto, mostra a tela de assinatura na hora
+  useEffect(() => {
+    if (!acessoAteMs) return;
+    const falta = acessoAteMs - Date.now();
+    if (falta <= 0) {
+      setStatusAssinatura('EXPIRADO');
+      return;
+    }
+    const t = setTimeout(() => setStatusAssinatura('EXPIRADO'), Math.min(falta, 2147483647));
+    return () => clearTimeout(t);
+  }, [acessoAteMs]);
 
   useEffect(() => {
     if (cartoes.length > 0) {
@@ -333,7 +371,6 @@ export default function App() {
     try {
       const res = await chamarApi('/whatsapp/desconectar');
       if (!res.ok) throw new Error('Falha ao desconectar');
-      await updateDoc(doc(db, 'users', user.uid), { whatsapp_status: 'DISCONNECTED', whatsapp_qr: '' });
     } catch (e) {
       alert('Erro ao desconectar WhatsApp.');
     }
@@ -1363,13 +1400,6 @@ export default function App() {
           setOrcamentos(data.orcamentos);
         }
 
-        if (data.status_assinatura) {
-          setStatusAssinatura(data.status_assinatura);
-        } else {
-          setStatusAssinatura('ATIVO');
-        }
-      } else {
-        setStatusAssinatura('INATIVO');
       }
     });
 
@@ -2105,6 +2135,21 @@ export default function App() {
         <div className="lg:col-span-2 space-y-6">
 
           {/* PAINEL ADMIN MASTER */}
+          {!isMaster && statusAssinatura === 'TESTE' && acessoAteMs && (
+            <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs rounded-2xl px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-2">
+              <span>
+                🎁 Teste grátis: {Math.max(1, Math.ceil((acessoAteMs - Date.now()) / 86400000))} dia(s) restante(s) (até {new Date(acessoAteMs).toLocaleDateString('pt-BR')})
+              </span>
+              {linkPagamentoAsaas ? (
+                <a href={linkPagamentoAsaas} target="_blank" rel="noreferrer" className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1.5 rounded-lg">Abrir fatura (PIX)</a>
+              ) : (
+                <button onClick={assinarPlanoPro} disabled={gerandoPix} className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1.5 rounded-lg disabled:opacity-60">
+                  {gerandoPix ? 'Gerando...' : 'Assinar agora'}
+                </button>
+              )}
+            </div>
+          )}
+
           {abaAtiva === 'admin' && isMaster && (
             <div className="space-y-6">
               <div className="bg-gradient-to-r from-amber-950/40 via-slate-900 to-slate-900 border border-amber-500/30 p-6 rounded-2xl flex items-center gap-4 shadow-xl">
@@ -2120,24 +2165,27 @@ export default function App() {
               <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 p-5 rounded-2xl shadow-xl">
                 <div className="space-y-3">
                   {clientesAdmin.length === 0 ? (
-                    <p className="text-sm text-slate-500 text-center py-4">Nenhum cliente carregado (verifique as regras de leitura global no Firestore).</p>
+                    <p className="text-sm text-slate-500 text-center py-4">Nenhum cliente encontrado.</p>
                   ) : (
                     clientesAdmin.map(cliente => (
                       <div key={cliente.id} className="bg-slate-950/70 border border-slate-800 p-4 rounded-xl flex items-center justify-between">
                         <div>
-                          <p className="font-bold text-sm text-slate-200">{cliente.id}</p>
+                          <p className="font-bold text-sm text-slate-200">{cliente.email || cliente.id}</p>
                           <div className="flex gap-3 mt-1.5">
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${cliente.status_assinatura === 'ATIVO' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-                              Plano: {cliente.status_assinatura || 'INATIVO'}
-                            </span>
+                            {(() => {
+                              const expirado = !cliente.acesso_ate || new Date(cliente.acesso_ate).getTime() <= Date.now();
+                              const rotulo = expirado ? 'EXPIRADO' : (cliente.status_assinatura || 'TESTE');
+                              const cor = expirado ? 'bg-rose-500/20 text-rose-400' : rotulo === 'ATIVO' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400';
+                              return <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${cor}`}>Plano: {rotulo}</span>;
+                            })()}
                             <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${cliente.whatsapp_status === 'CONNECTED' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
                               WPP: {cliente.whatsapp_status || 'DESCONECTADO'}
                             </span>
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-[10px] text-slate-500 uppercase">Validade</p>
-                          <p className="text-xs font-semibold text-amber-400">{cliente.plano_validade ? formatarDataBR(cliente.plano_validade) : 'N/A'}</p>
+                          <p className="text-[10px] text-slate-500 uppercase">Acesso até</p>
+                          <p className="text-xs font-semibold text-amber-400">{cliente.acesso_ate ? new Date(cliente.acesso_ate).toLocaleDateString('pt-BR') : 'N/A'}</p>
                         </div>
                       </div>
                     ))
