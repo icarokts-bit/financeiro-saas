@@ -43,7 +43,7 @@ const ORIGENS_PERMITIDAS = (process.env.ALLOWED_ORIGINS || 'https://financeiro-s
   .filter(Boolean);
 
 // Identifica qual versão do servidor está no ar (aparece no log de inicialização e em GET /)
-const BUILD_ID = '2026-11-24-wpp-v4';
+const BUILD_ID = '2026-11-24-wpp-v5';
 
 // Registro de cada chamada (método, rota, status e origem): sem isso, uma chamada recusada
 // por CORS, login ou assinatura não deixava nenhum rastro nos logs do Railway
@@ -162,6 +162,38 @@ const agendarReconexao = (userId, esperaMs, forcarVersaoNova = false) => {
 };
 
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
+
+// Palavras do nome de um cartão (sem acento, sem termos genéricos)
+const PALAVRAS_GENERICAS_CARTAO = new Set(['cartao', 'credito', 'banco', 'de', 'do', 'da']);
+const tokensDe = (str) =>
+  semAcento(str).split(/[^a-z0-9]+/).filter(t => t.length >= 2 && !PALAVRAS_GENERICAS_CARTAO.has(t));
+
+// Acha o cartão citado no texto: pelo nome completo ("infiniti rico") ou por partes dele ("infiniti", "c6", "black").
+// Partes só valem quando permitirParcial = true (ex.: a pessoa escreveu "cartão"/"crédito"), para "pix c6" não virar cartão.
+// Retorna { cartao } quando achou um só, { ambiguo: true } quando mais de um cartão serve, ou {} quando nenhum.
+function acharCartaoNoTexto(textoLimpo, cartoes, permitirParcial = true) {
+  const texto = ` ${semAcento(textoLimpo).replace(/[^a-z0-9]+/g, ' ')} `;
+  let melhor = null;
+  let melhorPontos = 0;
+  let empate = false;
+
+  for (const c of cartoes) {
+    const nomeNorm = semAcento(c.nome).replace(/[^a-z0-9]+/g, ' ').trim();
+    let pontos = 0;
+    if (nomeNorm && texto.includes(` ${nomeNorm} `)) {
+      pontos = 100;
+    } else if (permitirParcial) {
+      for (const t of tokensDe(c.nome)) {
+        if (texto.includes(` ${t} `)) pontos += 10;
+      }
+    }
+    if (pontos > melhorPontos) { melhor = c; melhorPontos = pontos; empate = false; }
+    else if (pontos > 0 && pontos === melhorPontos) { empate = true; }
+  }
+
+  if (empate) return { ambiguo: true };
+  return melhor ? { cartao: melhor } : {};
+}
 
 const formatarDataBR = (isoDate) => {
   if (!isoDate || !isoDate.includes('-')) return isoDate || '';
@@ -951,6 +983,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
       mesVenc += 1;
     }
 
+    let primeiraFatura = null;
     for (let i = 0; i < parcelasTotal; i++) {
       let anoMesItem = item.anoMes || anoMesPadrao;
       let dataVencItem = item.data_vencimento || hojeStr;
@@ -959,6 +992,7 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
         const fatura = calcularDataFaturaCartao(item.data_vencimento || hojeStr, diaFech, diaVencCartao, i + 1);
         anoMesItem = fatura.anoMes;
         dataVencItem = fatura.dataVencimento;
+        if (i === 0) primeiraFatura = fatura;
       } else if (parcelasTotal > 1) {
         const dataParcela = new Date(anoVenc, mesVenc + i, diaVenc);
         anoMesItem = `${dataParcela.getFullYear()}-${String(dataParcela.getMonth() + 1).padStart(2, '0')}`;
@@ -1057,9 +1091,13 @@ async function gravarItensNoBanco(userId, itens, cartoes, bancos, orcamentos, an
 
     const origemPagamento = isCredito ? `Cartão ${item.cartao_nome}` : item.banco_nome ? `${item.metodo} (${item.banco_nome})` : item.metodo;
 
+    const infoFatura = isCredito && primeiraFatura
+      ? `\n🧾 _${parcelasTotal > 1 ? `1ª parcela na fatura` : 'Fatura'} ${primeiraFatura.anoMes.split('-')[1]}/${primeiraFatura.anoMes.split('-')[0]} · vence em ${formatarDataBR(primeiraFatura.dataVencimento)}_`
+      : '';
+
     respostas.push(
       `🧠 *[Aprendido]* ✅ *${item.descricao}* [${catFinal} > ${subFinal}]\n` +
-      `💰 R$ ${valorParcela.toFixed(2)} - ${origemPagamento}${alertasExtras}`
+      `💰 R$ ${valorParcela.toFixed(2)} - ${origemPagamento}${infoFatura}${alertasExtras}`
     );
   }
 
@@ -1262,10 +1300,10 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
           let cartaoResp = null;
           let bancoResp = null;
 
-          for (const c of cartoes) {
-            const nCartao = semAcento(c.nome).toLowerCase();
-            if (txtLimpo.includes(nCartao) || nCartao.includes(txtLimpo)) { metodoResp = 'CREDITO'; cartaoResp = c.nome; break; }
-          }
+          // Aceita o nome completo ou parte dele ("cartão infiniti", "c6"), sem confundir com "pix c6"
+          const citouOutroMetodo = /\b(pix|debito|dinheiro)\b/.test(txtLimpo);
+          const achadoCartaoResp = acharCartaoNoTexto(txtLimpo, cartoes, !citouOutroMetodo || /cartao|credito/.test(txtLimpo));
+          if (achadoCartaoResp.cartao) { metodoResp = 'CREDITO'; cartaoResp = achadoCartaoResp.cartao.nome; }
           for (const b of bancos) {
             const nBanco = semAcento(b.nome).toLowerCase();
             if (txtLimpo.includes(nBanco) || nBanco.includes(txtLimpo)) {
@@ -1275,21 +1313,41 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
             }
           }
           if (!metodoResp) {
-            if (/credito|cartao/i.test(txtLimpo)) { metodoResp = 'CREDITO'; cartaoResp = cartoes[0]?.nome || 'CREDITO'; }
+            if (/credito|cartao/i.test(txtLimpo)) {
+              if (cartoes.length <= 1) { metodoResp = 'CREDITO'; cartaoResp = cartoes[0]?.nome || 'CREDITO'; }
+            }
             else if (/debito/i.test(txtLimpo)) metodoResp = 'DEBITO';
             else if (/pix/i.test(txtLimpo)) metodoResp = 'PIX';
             else if (/dinheiro/i.test(txtLimpo)) metodoResp = 'DINHEIRO';
           }
 
           if (metodoResp) {
+            // A pessoa pode responder junto a categoria: "Cartão infiniti. Categoria Sistema"
+            const matchCatMsg = textoUsuario.match(/categoria\s*[:\-]?\s*([^.\n]+)/i);
+            let catMsg = null;
+            if (matchCatMsg) {
+              const catTxt = matchCatMsg[1].trim();
+              const existente = (categorias || []).find(c => semAcento(String(c)) === semAcento(catTxt));
+              catMsg = existente ? String(existente) : catTxt.charAt(0).toUpperCase() + catTxt.slice(1);
+            }
+
             itensAtualizados = itensAtualizados.map(it => ({
               ...it,
               metodo: metodoResp,
               cartao_nome: cartaoResp,
               banco_nome: metodoResp === 'CREDITO' ? null : (bancoResp || it.banco_nome || null),
+              ...(catMsg ? { categoria: catMsg, subcategoria: 'Geral', precisaPerguntarCategoria: false } : {}),
               pago: true
             }));
             await processarFilaDePendencias(userId, itensAtualizados, cartoes, bancos, orcamentos, anoMesAtual, `${pendente.textoOriginal} (${textoUsuario})`, sock, remoteJid);
+            return;
+          }
+
+          // Resposta sem número que não deu para entender: pergunta de novo em vez de ficar em silêncio
+          if (!/\d/.test(txtLimpo)) {
+            await enviarMensagemSegura(sock, remoteJid, {
+              text: `🤔 Não entendi a forma de pagamento. Responda com *Pix*, *Débito*, *Dinheiro* ou o nome do cartão (*${cartoes.map(c => c.nome).join(', ')}*).`
+            });
             return;
           }
         } else if (pendente.etapa === 'BANCO') {
@@ -1391,7 +1449,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       const bancoInformado = bancos.find(b => txtLimpo.includes(semAcento(b.nome).toLowerCase()));
 
       if (/fatura/i.test(txtLimpo)) {
-        const cartaoAlvo = cartoes.find(c => txtLimpo.includes(semAcento(c.nome).toLowerCase())) || cartoes[0];
+        const cartaoAlvo = acharCartaoNoTexto(txtLimpo, cartoes, true).cartao || cartoes[0];
         if (cartaoAlvo) {
           const itensFatura = transMes.filter(t => t.tipo === 'DESPESA' && semAcento(t.cartao_nome) === semAcento(cartaoAlvo.nome) && !t.fatura_paga);
           const totalFatura = itensFatura.reduce((a, b) => a + Number(b.valor || 0), 0);
@@ -1470,7 +1528,8 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
     for (const parte of partes) {
       const pLimpo = semAcento(parte).toLowerCase();
       const infoVenc = extrairDataVencimento(parte);
-      const isAgendado = Boolean(infoVenc) || /\b(vence|vencimento|a pagar|a receber)\b/i.test(pLimpo);
+      const vencimentoExplicito = /\b(vence|vencimento|a pagar|a receber)\b/i.test(pLimpo);
+      let isAgendado = Boolean(infoVenc) || vencimentoExplicito;
       const parteSemData = infoVenc ? parte.replace(infoVenc.trechoRemovido, ' ') : parte;
       const matchValor = parteSemData.match(/(\d+\.\d{2}|\d+)/);
       if (!matchValor) continue;
@@ -1483,17 +1542,23 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
       let cartaoNome = null;
       let bancoNome = null;
 
-      for (const c of cartoes) { 
-        const nCartao = semAcento(c.nome).toLowerCase();
-        if (pLimpo.includes(nCartao) || nCartao.includes(pLimpo)) { metodo = 'CREDITO'; cartaoNome = c.nome; break; } 
-      }
-      for (const b of bancos) { 
-        const nBanco = semAcento(b.nome).toLowerCase();
-        if (pLimpo.includes(nBanco) || nBanco.includes(pLimpo)) { bancoNome = b.nome; if (!metodo) metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX'; break; } 
+      // Reconhece o cartão pelo nome completo ou por partes dele ("cartão infiniti", "c6")
+      const falouCartao = /cartao|credito/.test(pLimpo);
+      const achadoCartao = acharCartaoNoTexto(pLimpo, cartoes, falouCartao);
+      if (achadoCartao.cartao) { metodo = 'CREDITO'; cartaoNome = achadoCartao.cartao.nome; }
+
+      if (metodo !== 'CREDITO') {
+        for (const b of bancos) {
+          const nBanco = semAcento(b.nome).toLowerCase();
+          if (pLimpo.includes(nBanco) || nBanco.includes(pLimpo)) { bancoNome = b.nome; if (!metodo) metodo = /debito/i.test(pLimpo) ? 'DEBITO' : 'PIX'; break; }
+        }
       }
 
       if (!metodo) {
-        if (/credito|cartao/i.test(pLimpo)) { metodo = 'CREDITO'; cartaoNome = cartoes[0]?.nome || 'CREDITO'; }
+        if (/credito|cartao/i.test(pLimpo)) {
+          // Com vários cartões e nenhum identificado, deixa em branco: o robô pergunta qual
+          if (cartoes.length <= 1) { metodo = 'CREDITO'; cartaoNome = cartoes[0]?.nome || 'CREDITO'; }
+        }
         else if (/debito/i.test(pLimpo)) metodo = 'DEBITO';
         else if (/pix/i.test(pLimpo)) metodo = 'PIX';
         else if (/dinheiro/i.test(pLimpo)) metodo = 'DINHEIRO';
@@ -1501,6 +1566,21 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
       let descricao = parteSemData.replace(/\b(comprei|gastei|paguei|no pix|no debito|pix|debito|reais|r\$|de|do|da|no|na|em)\b/gi, ' ').replace(matchValor[0], '').trim();
       descricao = descricao.charAt(0).toUpperCase() + descricao.slice(1);
+
+      // No cartão de crédito a data informada é a data da COMPRA (a fatura sai do fechamento do cartão),
+      // a menos que a pessoa diga "vence"/"a pagar"
+      if (metodo === 'CREDITO' && !vencimentoExplicito) isAgendado = false;
+
+      if (metodo === 'CREDITO') {
+        // Tira "cartão", "crédito" e o nome do cartão da descrição ("Gasolina cartão infiniti" -> "Gasolina")
+        const palavrasCartao = new Set(['cartao', 'credito', ...tokensDe(cartaoNome || '')]);
+        const semPalavras = descricao
+          .split(/\s+/)
+          .filter(w => !palavrasCartao.has(semAcento(w).replace(/[^a-z0-9]/g, '')))
+          .join(' ')
+          .trim();
+        if (semPalavras) descricao = semPalavras.charAt(0).toUpperCase() + semPalavras.slice(1);
+      }
 
       const regraSalva = await consultarRegraAprendida(userId, descricao);
       let cat = regraSalva ? regraSalva.categoria : null;
@@ -1528,7 +1608,7 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
         categoria: cat,
         subcategoria: sub,
         precisaPerguntarCategoria: !cat,
-        precisaPerguntarData: (parcelasTotal > 1 || isAgendado) && !infoVenc,
+        precisaPerguntarData: ((parcelasTotal > 1 && metodo !== 'CREDITO') || isAgendado) && !infoVenc,
         pago: !isAgendado,
         data_vencimento: infoVenc ? infoVenc.dataVencimento : hojeStr,
         anoMes: infoVenc ? infoVenc.anoMes : anoMesAtual

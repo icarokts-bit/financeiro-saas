@@ -2,7 +2,7 @@
 // ==================== INÍCIO PARTE 1 DE 4: IMPORTS E ESTADOS ================
 // ============================================================================
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Wallet, Sparkles, CheckCircle2, RefreshCw, LogOut, BarChart2,
   FileText, Clock, CreditCard, Landmark, FolderPlus, QrCode, Users,
@@ -10,6 +10,7 @@ import {
   TrendingUp, TrendingDown, BrainCircuit, Target, Search, Edit3,
   Trash2, BellRing, Zap, ArrowRightLeft, Plus, MessageSquare, Send, X
 } from 'lucide-react';
+import Onboarding from './Onboarding.jsx';
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis
 } from 'recharts';
@@ -165,6 +166,10 @@ export default function App() {
   const [erroAuth, setErroAuth] = useState('');
   const [statusAssinatura, setStatusAssinatura] = useState('VERIFICANDO');
   const [acessoAteMs, setAcessoAteMs] = useState(null);
+  const [onboardingConcluido, setOnboardingConcluido] = useState(null); // null = ainda carregando
+  const [onboardingAtivo, setOnboardingAtivo] = useState(false);
+  const [perfilCarregado, setPerfilCarregado] = useState(false);
+  const onboardingDecidido = useRef(false);
   const [linkPagamentoAsaas, setLinkPagamentoAsaas] = useState('');
   const [gerandoPix, setGerandoPix] = useState(false);
 
@@ -269,6 +274,7 @@ export default function App() {
 
       setStatusAssinatura(calcularStatusAssinatura(data));
       setAcessoAteMs(data.acesso_ate.toDate().getTime());
+      setOnboardingConcluido(!!data.onboarding_concluido);
       setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
       setWhatsappQrCode(data.whatsapp_qrcode || data.whatsapp_qr || '');
       setWhatsappErro(data.whatsapp_erro || '');
@@ -335,6 +341,18 @@ export default function App() {
   }, [whatsappQrCode]);
 
   const qrExpirado = !!whatsappQrCode && !!whatsappQrEm && (agoraMs - whatsappQrEm) > 60000;
+
+  // Cadastro guiado: decide uma única vez, quando tudo já carregou. Aparece só para conta nova
+  // (sem banco, sem cartão e sem ter concluído antes). Quem já tem dados nunca vê.
+  useEffect(() => {
+    if (onboardingDecidido.current) return;
+    if (!perfilCarregado || onboardingConcluido === null) return;
+    if (statusAssinatura !== 'TESTE' && statusAssinatura !== 'ATIVO') return;
+    onboardingDecidido.current = true;
+    if (onboardingConcluido === false && bancos.length === 0 && cartoes.length === 0) {
+      setOnboardingAtivo(true);
+    }
+  }, [perfilCarregado, onboardingConcluido, statusAssinatura, bancos, cartoes]);
 
   // Encerra o "gerando QR Code" assim que o QR chega, conecta ou o servidor informa um erro
   useEffect(() => {
@@ -471,6 +489,30 @@ export default function App() {
   const excluirBanco = async (id) => {
     if (window.confirm('Deseja remover esta conta bancária?')) {
       await setDoc(doc(db, 'users', user.uid), { bancos: bancos.filter(b => b.id !== id) }, { merge: true });
+    }
+  };
+
+  // ===== Cadastro guiado (primeiro acesso) =====
+  const criarBancoRapido = async ({ nome, tipo, saldoInicial }) => {
+    if (!user) return;
+    const novo = { id: String(Date.now()), nome, tipo, saldoInicial };
+    await setDoc(doc(db, 'users', user.uid), { bancos: [...bancos, novo] }, { merge: true });
+  };
+
+  const criarCartaoRapido = async ({ nome, banco, limite, diaFechamento, diaVencimento }) => {
+    if (!user) return;
+    const novo = { id: String(Date.now()), nome, banco, limite, diaFechamento, diaVencimento };
+    await setDoc(doc(db, 'users', user.uid), { cartoes: [...cartoes, novo] }, { merge: true });
+  };
+
+  const concluirOnboarding = async (irParaWhatsapp = false) => {
+    setOnboardingAtivo(false);
+    setOnboardingConcluido(true);
+    if (irParaWhatsapp) setAbaAtiva('whatsapp');
+    try {
+      if (user) await setDoc(doc(db, 'users', user.uid), { onboarding_concluido: true }, { merge: true });
+    } catch (e) {
+      console.error('Erro ao salvar o fim do cadastro guiado:', e);
     }
   };
 
@@ -1430,6 +1472,7 @@ export default function App() {
         setBancos(comId(data.bancos));
         setCartoes(comId(data.cartoes));
         setContasFixas(comId(data.contas_fixas));
+        setPerfilCarregado(true);
 
         if (Array.isArray(data.categorias) && data.categorias.length > 0) {
           setCategorias(data.categorias);
@@ -1737,6 +1780,21 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col md:flex-row font-sans selection:bg-emerald-500 selection:text-slate-950">
       
+      {/* CADASTRO GUIADO NO PRIMEIRO ACESSO */}
+      {onboardingAtivo && (
+        <Onboarding
+          bancos={bancos}
+          cartoes={cartoes}
+          diasTeste={statusAssinatura === 'TESTE' && acessoAteMs ? Math.max(1, Math.ceil((acessoAteMs - Date.now()) / 86400000)) : null}
+          hojeIso={hojeIso}
+          calcularFatura={calcularDataFaturaCartao}
+          formatarData={formatarDataBR}
+          onCriarBanco={criarBancoRapido}
+          onCriarCartao={criarCartaoRapido}
+          onConcluir={concluirOnboarding}
+        />
+      )}
+
       {/* MODAL DE DAR BAIXA EM CONTA ESCOLHENDO O BANCO */}
       {modalBaixaConta && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
