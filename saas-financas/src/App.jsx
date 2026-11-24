@@ -24,7 +24,8 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from './firebaseConfig';
 
-const RENDER_API_URL = import.meta.env.VITE_RENDER_API_URL || 'https://sua-api.onrender.com';
+// Endereço do servidor (Railway). Se mudar de domínio, defina VITE_RENDER_API_URL na Vercel e publique de novo.
+const RENDER_API_URL = import.meta.env.VITE_RENDER_API_URL || 'https://financeiro-saas-production-66cc.up.railway.app';
 
 // Chama o backend enviando o token de login do Firebase: é ele que identifica o usuário no servidor
 const chamarApi = async (caminho, corpo = {}) => {
