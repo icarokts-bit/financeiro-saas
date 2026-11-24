@@ -184,6 +184,7 @@ export default function App() {
   // WhatsApp Status & QR
   const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
   const [whatsappQrCode, setWhatsappQrCode] = useState('');
+  const [whatsappErro, setWhatsappErro] = useState('');
   const [carregandoQr, setCarregandoQr] = useState(false);
 
   // Formulários e Modais
@@ -267,6 +268,7 @@ export default function App() {
       setAcessoAteMs(data.acesso_ate.toDate().getTime());
       setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
       setWhatsappQrCode(data.whatsapp_qrcode || data.whatsapp_qr || '');
+      setWhatsappErro(data.whatsapp_erro || '');
       if (data.categorias && Array.isArray(data.categorias)) setCategorias(data.categorias);
       if (data.subcategorias) setSubcategorias(data.subcategorias);
       if (data.orcamentos) setOrcamentos(data.orcamentos);
@@ -319,6 +321,11 @@ export default function App() {
     return () => clearTimeout(t);
   }, [acessoAteMs]);
 
+  // Encerra o "gerando QR Code" assim que o QR chega, conecta ou o servidor informa um erro
+  useEffect(() => {
+    if (whatsappQrCode || whatsappStatus === 'CONNECTED' || whatsappErro) setCarregandoQr(false);
+  }, [whatsappQrCode, whatsappStatus, whatsappErro]);
+
   useEffect(() => {
     if (cartoes.length > 0) {
       setNovaCompraCartao(prev => ({ ...prev, cartaoNome: prev.cartaoNome || cartoes[0].nome }));
@@ -361,13 +368,27 @@ export default function App() {
   const solicitarConexaoWhatsApp = async () => {
     if (!user) return;
     setCarregandoQr(true);
+    setWhatsappErro('');
     try {
       const res = await chamarApi('/whatsapp/iniciar');
-      if (!res.ok) throw new Error('Falha ao iniciar conexão');
+      if (!res.ok) {
+        let motivo = `Falha ao iniciar a conexão (código ${res.status}).`;
+        try {
+          const corpo = await res.json();
+          if (corpo?.error) motivo = corpo.error;
+        } catch (e) {}
+        throw new Error(motivo);
+      }
+      // O QR chega pelo banco em poucos segundos; o aviso de "gerando" some quando ele aparecer
+      setTimeout(() => setCarregandoQr(false), 45000);
     } catch (e) {
-      alert('Erro ao solicitar QR Code ao servidor.');
-    } finally {
+      console.error('Erro ao conectar WhatsApp:', e);
       setCarregandoQr(false);
+      alert(
+        e instanceof TypeError
+          ? 'Não consegui falar com o servidor do WhatsApp. Verifique se ele está no ar e se o endereço do site está liberado no servidor (CORS).'
+          : e.message
+      );
     }
   };
 
@@ -3460,7 +3481,12 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-4 py-6">
-                    <p className="text-xs text-slate-400">Nenhum QR Code ativo no momento.</p>
+                    {whatsappErro && (
+                      <p className="text-xs text-rose-400 max-w-xs mx-auto">{whatsappErro}</p>
+                    )}
+                    <p className="text-xs text-slate-400">
+                      {carregandoQr ? 'Gerando QR Code, aguarde alguns segundos...' : 'Nenhum QR Code ativo no momento.'}
+                    </p>
                     <button 
                       onClick={solicitarConexaoWhatsApp} 
                       disabled={carregandoQr}

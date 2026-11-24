@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
+    "@whiskeysockets/baileys": "^6.7.24",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "firebase-admin": "^12.3.0",

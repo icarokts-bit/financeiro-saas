@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState, Browsers } from '@whiskeysockets/baileys';
+import * as Baileys from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
 import admin from 'firebase-admin';
@@ -89,6 +90,61 @@ const validarChaveInterna = (req, res, next) => {
 const sessions = new Map();
 const userJids = new Map();
 const sentMessagesCache = new Map();
+
+const tentativasReconexao = new Map(); // userId -> tentativas seguidas sem conseguir abrir a conexão
+const tentativas405 = new Map();       // userId -> vezes que o WhatsApp recusou a versão (erro 405)
+const geracaoSessao = new Map();       // userId -> número que muda quando o usuário pede nova conexão/desconexão
+
+// Versão do WhatsApp Web usada na conexão. O WhatsApp recusa (erro 405) versões antigas, e a lista do
+// Baileys pode estar atrasada. Ordem: manual (WA_VERSION="2,3000,123") -> WhatsApp Web ao vivo -> lista do Baileys -> padrão.
+let cacheVersaoWA = { version: null, origem: null, em: 0 };
+async function obterVersaoWhatsApp(forcarAtualizar = false) {
+  if (process.env.WA_VERSION) {
+    const v = process.env.WA_VERSION.split(',').map(n => Number(n.trim()));
+    if (v.length === 3 && v.every(Number.isFinite)) return { version: v, origem: 'WA_VERSION (manual)' };
+  }
+  if (!forcarAtualizar && cacheVersaoWA.version && Date.now() - cacheVersaoWA.em < 30 * 60 * 1000) {
+    return cacheVersaoWA;
+  }
+
+  const buscarAoVivo = Baileys.fetchLatestWaWebVersion || Baileys.default?.fetchLatestWaWebVersion;
+  if (typeof buscarAoVivo === 'function') {
+    try {
+      const r = await buscarAoVivo();
+      if (r?.version && r.isLatest !== false) {
+        cacheVersaoWA = { version: r.version, origem: 'WhatsApp Web (ao vivo)', em: Date.now() };
+        return cacheVersaoWA;
+      }
+    } catch (e) { /* tenta a próxima fonte */ }
+  }
+
+  try {
+    const r = await fetchLatestBaileysVersion();
+    if (r?.version) {
+      cacheVersaoWA = { version: r.version, origem: 'lista do Baileys', em: Date.now() };
+      return cacheVersaoWA;
+    }
+  } catch (e) { /* usa o padrão da biblioteca */ }
+
+  return { version: undefined, origem: 'padrão da biblioteca' };
+}
+
+// Mostra o motivo no site (campo só escrito pelo servidor) e deixa o usuário tentar de novo
+const registrarErroWhatsApp = (userId, texto) =>
+  db.collection('users').doc(userId).set({
+    whatsapp_status: 'DISCONNECTED',
+    whatsapp_qrcode: null,
+    whatsapp_erro: texto
+  }, { merge: true }).catch(() => {});
+
+// Reconexão agendada que é cancelada se o usuário pedir nova conexão/desconexão enquanto espera
+const agendarReconexao = (userId, esperaMs, forcarVersaoNova = false) => {
+  const geracao = geracaoSessao.get(userId) || 0;
+  setTimeout(() => {
+    if ((geracaoSessao.get(userId) || 0) !== geracao) return;
+    startWhatsAppForUser(userId, forcarVersaoNova);
+  }, esperaMs);
+};
 
 const semAcento = (str) => str ? str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase() : '';
 
@@ -374,14 +430,19 @@ app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, async (req, res)
   }
 
   try {
+    // Tira a conexão antiga do mapa ANTES de encerrá-la, para o evento de "fechou" dela ser ignorado
     const sockAntigo = sessions.get(userId);
+    sessions.delete(userId);
+    geracaoSessao.set(userId, (geracaoSessao.get(userId) || 0) + 1);
+    tentativasReconexao.delete(userId);
+    tentativas405.delete(userId);
     if (sockAntigo) {
-      try { sockAntigo.end(); } catch (e) {}
-      sessions.delete(userId);
+      try { sockAntigo.end(undefined); } catch (e) {}
     }
 
     limparPastaSessaoLocal(userId);
-    startWhatsAppForUser(userId);
+    await db.collection('users').doc(userId).set({ whatsapp_erro: null }, { merge: true }).catch(() => {});
+    startWhatsAppForUser(userId, true);
     res.json({ ok: true, message: 'Gerando novo QR Code...' });
   } catch (err) {
     console.error('Erro na rota /conectar:', err);
@@ -393,16 +454,20 @@ app.post(['/desconectar', '/whatsapp/desconectar'], autenticarUsuario, async (re
   const userId = req.uid;
 
   const sock = sessions.get(userId);
+  sessions.delete(userId);
+  geracaoSessao.set(userId, (geracaoSessao.get(userId) || 0) + 1);
+  tentativasReconexao.delete(userId);
+  tentativas405.delete(userId);
   if (sock) {
     try { await sock.logout(); } catch (e) {}
-    sessions.delete(userId);
   }
 
   limparPastaSessaoLocal(userId);
 
   await db.collection('users').doc(userId).set({
     whatsapp_status: 'DISCONNECTED',
-    whatsapp_qrcode: null
+    whatsapp_qrcode: null,
+    whatsapp_erro: null
   }, { merge: true }).catch(() => {});
 
   res.json({ ok: true });
@@ -411,7 +476,7 @@ app.post(['/desconectar', '/whatsapp/desconectar'], autenticarUsuario, async (re
 // ============================================================================
 // 2. INICIALIZAÇÃO DO SOCKET DO WHATSAPP (COM VOLUME LOCAL - ZERO FIRESTORE)
 // ============================================================================
-async function startWhatsAppForUser(userId) {
+async function startWhatsAppForUser(userId, forcarVersaoNova = false) {
   try {
     console.log(`⚡ A iniciar instância WhatsApp (Volume Local) para userId: ${userId}`);
     
@@ -421,10 +486,12 @@ async function startWhatsAppForUser(userId) {
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(userAuthDir);
-    const { version } = await fetchLatestBaileysVersion();
+    const { version, origem: origemVersao } = await obterVersaoWhatsApp(forcarVersaoNova);
+    console.log(`📦 Versão do WhatsApp para ${userId}: ${version ? version.join('.') : 'padrão'} (${origemVersao})`);
+    const sessaoPareada = !!state.creds?.registered;
 
     const sock = makeWASocket({
-      version,
+      ...(version ? { version } : {}),
       auth: state,
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
@@ -441,7 +508,11 @@ async function startWhatsAppForUser(userId) {
       }
     });
 
+    const anterior = sessions.get(userId);
     sessions.set(userId, sock);
+    if (anterior && anterior !== sock) {
+      try { anterior.end(undefined); } catch (e) {}
+    }
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
@@ -452,7 +523,8 @@ async function startWhatsAppForUser(userId) {
         const qrBase64 = await QRCode.toDataURL(qr);
         await userRef.set({
           whatsapp_status: 'WAITING_QR',
-          whatsapp_qrcode: qrBase64
+          whatsapp_qrcode: qrBase64,
+          whatsapp_erro: null
         }, { merge: true }).catch(() => {});
       }
 
@@ -463,26 +535,70 @@ async function startWhatsAppForUser(userId) {
         await userRef.set({
           whatsapp_status: 'CONNECTED',
           whatsapp_qrcode: null,
-          whatsapp_jid: meJid
+          whatsapp_jid: meJid,
+          whatsapp_erro: null
         }, { merge: true }).catch(() => {});
+        tentativasReconexao.delete(userId);
+        tentativas405.delete(userId);
         console.log(`✅ WhatsApp CONECTADO para: ${userId} (${meJid})`);
       }
 
       if (connection === 'close') {
+        // Conexão antiga ou substituída (ex.: o usuário pediu um novo QR): ignora, quem vale é a atual
+        if (sessions.get(userId) !== sock) return;
+
         const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const detalhe = lastDisconnect?.error?.message || '';
         const foiDeslogado = statusCode === DisconnectReason.loggedOut || statusCode === 401;
 
-        if (!foiDeslogado) {
-          console.log(`🔄 Reconectando WhatsApp de ${userId} em 5s (Código: ${statusCode})...`);
-          setTimeout(() => startWhatsAppForUser(userId), 5000);
-        } else {
+        if (foiDeslogado) {
           console.log(`🛑 Sessão encerrada/deslogada para ${userId}. Limpando arquivos.`);
           limparPastaSessaoLocal(userId);
           sessions.delete(userId);
+          tentativasReconexao.delete(userId);
           await userRef.set({
             whatsapp_status: 'DISCONNECTED',
-            whatsapp_qrcode: null
+            whatsapp_qrcode: null,
+            whatsapp_erro: null
           }, { merge: true }).catch(() => {});
+
+        } else if (statusCode === DisconnectReason.connectionReplaced) {
+          // Outra instância/aparelho assumiu a sessão: reconectar só criaria uma briga entre as duas
+          console.warn(`⚠️ Sessão de ${userId} foi aberta em outro lugar (440).`);
+          sessions.delete(userId);
+          await registrarErroWhatsApp(userId, 'O WhatsApp foi aberto em outro lugar e esta conexão foi encerrada. Gere um novo QR Code para reconectar.');
+
+        } else if (statusCode === 405) {
+          // WhatsApp recusou a versão: tenta uma vez com a versão buscada ao vivo; depois desiste (sem martelar o servidor deles)
+          const n = (tentativas405.get(userId) || 0) + 1;
+          tentativas405.set(userId, n);
+          if (n <= 1) {
+            console.warn(`⚠️ WhatsApp recusou a versão (405) para ${userId}. Nova tentativa com a versão atual em 3s...`);
+            agendarReconexao(userId, 3000, true);
+          } else {
+            console.error(`❌ Erro 405 persistente para ${userId} (${detalhe}). Atualize o Baileys ou defina WA_VERSION no servidor.`);
+            sessions.delete(userId);
+            await registrarErroWhatsApp(userId, 'O WhatsApp recusou a conexão agora (erro 405). Tente novamente em alguns minutos.');
+          }
+
+        } else if (statusCode === DisconnectReason.restartRequired) {
+          // Normal logo depois de ler o QR: a conexão precisa reiniciar
+          agendarReconexao(userId, 1000);
+
+        } else {
+          const n = (tentativasReconexao.get(userId) || 0) + 1;
+          tentativasReconexao.set(userId, n);
+
+          if (!sessaoPareada && n > 6) {
+            console.warn(`⚠️ Desistindo de conectar ${userId} após ${n - 1} tentativas (Código: ${statusCode}).`);
+            sessions.delete(userId);
+            await registrarErroWhatsApp(userId, 'Não foi possível concluir a conexão. Clique em "Gerar QR Code" para tentar de novo.');
+          } else {
+            // Aparelho já pareado: continua tentando para sempre, com espera crescente (máx. 60s)
+            const espera = Math.min(5000 * 2 ** (n - 1), 60000);
+            console.log(`🔄 Reconectando WhatsApp de ${userId} em ${Math.round(espera / 1000)}s (Código: ${statusCode}, tentativa ${n})...`);
+            agendarReconexao(userId, espera);
+          }
         }
       }
     });

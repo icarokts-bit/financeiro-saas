@@ -17,6 +17,7 @@ service cloud.firestore {
         'whatsapp_status',
         'whatsapp_qrcode',
         'whatsapp_qr',
+        'whatsapp_erro',
         'whatsapp_jid',
         'ultimo_alerta_data'
       ];
