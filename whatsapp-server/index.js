@@ -43,7 +43,7 @@ const ORIGENS_PERMITIDAS = (process.env.ALLOWED_ORIGINS || 'https://financeiro-s
   .filter(Boolean);
 
 // Identifica qual versão do servidor está no ar (aparece no log de inicialização e em GET /)
-const BUILD_ID = '2026-11-24-wpp-v2';
+const BUILD_ID = '2026-11-24-wpp-v4';
 
 // Registro de cada chamada (método, rota, status e origem): sem isso, uma chamada recusada
 // por CORS, login ou assinatura não deixava nenhum rastro nos logs do Railway
@@ -456,7 +456,7 @@ app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, async (req, res)
     }
 
     limparPastaSessaoLocal(userId);
-    await db.collection('users').doc(userId).set({ whatsapp_erro: null }, { merge: true }).catch(() => {});
+    await db.collection('users').doc(userId).set({ whatsapp_erro: null, whatsapp_qrcode: null, whatsapp_qr_em: null }, { merge: true }).catch(() => {});
     startWhatsAppForUser(userId, true);
     res.json({ ok: true, message: 'Gerando novo QR Code...' });
   } catch (err) {
@@ -508,7 +508,7 @@ async function startWhatsAppForUser(userId, forcarVersaoNova = false) {
     const sock = makeWASocket({
       ...(version ? { version } : {}),
       auth: state,
-      logger: pino({ level: 'silent' }),
+      logger: pino({ level: process.env.WA_LOG_LEVEL || 'warn' }),
       printQRInTerminal: false,
       browser: Browsers.macOS('Desktop'),
       connectTimeoutMs: 60000,
@@ -535,10 +535,12 @@ async function startWhatsAppForUser(userId, forcarVersaoNova = false) {
       const userRef = db.collection('users').doc(userId);
 
       if (qr) {
+        console.log(`📱 QR Code gerado para ${userId}`);
         const qrBase64 = await QRCode.toDataURL(qr);
         await userRef.set({
           whatsapp_status: 'WAITING_QR',
           whatsapp_qrcode: qrBase64,
+          whatsapp_qr_em: Date.now(),
           whatsapp_erro: null
         }, { merge: true }).catch(() => {});
       }
@@ -550,6 +552,7 @@ async function startWhatsAppForUser(userId, forcarVersaoNova = false) {
         await userRef.set({
           whatsapp_status: 'CONNECTED',
           whatsapp_qrcode: null,
+          whatsapp_qr_em: null,
           whatsapp_jid: meJid,
           whatsapp_erro: null
         }, { merge: true }).catch(() => {});
@@ -564,7 +567,14 @@ async function startWhatsAppForUser(userId, forcarVersaoNova = false) {
 
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const detalhe = lastDisconnect?.error?.message || '';
+        console.log(`🔌 Conexão de ${userId} fechou (código ${statusCode ?? 'sem código'}${detalhe ? `: ${detalhe}` : ''})`);
         const foiDeslogado = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+
+        // A conexão que gerou o QR da tela morreu: tira o QR para ninguém escanear um QR "morto"
+        // (o celular responde "Não foi possível conectar o dispositivo")
+        if (!foiDeslogado) {
+          await userRef.set({ whatsapp_qrcode: null, whatsapp_qr_em: null }, { merge: true }).catch(() => {});
+        }
 
         if (foiDeslogado) {
           console.log(`🛑 Sessão encerrada/deslogada para ${userId}. Limpando arquivos.`);
@@ -1536,6 +1546,11 @@ async function processarMensagemInteligente(userId, textoUsuario, sock, remoteJi
 
 async function restaurarSessoesAtivas() {
   try {
+    const orfaos = await db.collection('users').where('whatsapp_status', '==', 'WAITING_QR').get();
+    orfaos.forEach(doc => {
+      doc.ref.set({ whatsapp_status: 'DISCONNECTED', whatsapp_qrcode: null, whatsapp_qr_em: null }, { merge: true }).catch(() => {});
+    });
+
     const usersSnap = await db.collection('users').where('whatsapp_status', '==', 'CONNECTED').get();
     usersSnap.forEach(doc => {
       const userAuthDir = path.join(AUTH_BASE_DIR, `session_${doc.id}`);

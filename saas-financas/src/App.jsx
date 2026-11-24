@@ -186,6 +186,8 @@ export default function App() {
   const [whatsappStatus, setWhatsappStatus] = useState('DISCONNECTED');
   const [whatsappQrCode, setWhatsappQrCode] = useState('');
   const [whatsappErro, setWhatsappErro] = useState('');
+  const [whatsappQrEm, setWhatsappQrEm] = useState(null);
+  const [agoraMs, setAgoraMs] = useState(Date.now());
   const [carregandoQr, setCarregandoQr] = useState(false);
 
   // Formulários e Modais
@@ -270,6 +272,7 @@ export default function App() {
       setWhatsappStatus(data.whatsapp_status || 'DISCONNECTED');
       setWhatsappQrCode(data.whatsapp_qrcode || data.whatsapp_qr || '');
       setWhatsappErro(data.whatsapp_erro || '');
+      setWhatsappQrEm(data.whatsapp_qr_em || null);
       if (data.categorias && Array.isArray(data.categorias)) setCategorias(data.categorias);
       if (data.subcategorias) setSubcategorias(data.subcategorias);
       if (data.orcamentos) setOrcamentos(data.orcamentos);
@@ -321,6 +324,17 @@ export default function App() {
     const t = setTimeout(() => setStatusAssinatura('EXPIRADO'), Math.min(falta, 2147483647));
     return () => clearTimeout(t);
   }, [acessoAteMs]);
+
+  // Enquanto há um QR na tela, confere de tempos em tempos se ele ainda é recente
+  // (o servidor gera um novo a cada ~20s; se parou de chegar, a conexão que o gerou morreu)
+  useEffect(() => {
+    if (!whatsappQrCode) return;
+    setAgoraMs(Date.now());
+    const t = setInterval(() => setAgoraMs(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [whatsappQrCode]);
+
+  const qrExpirado = !!whatsappQrCode && !!whatsappQrEm && (agoraMs - whatsappQrEm) > 60000;
 
   // Encerra o "gerando QR Code" assim que o QR chega, conecta ou o servidor informa um erro
   useEffect(() => {
@@ -3475,15 +3489,22 @@ export default function App() {
                     <p className="text-sm font-bold text-emerald-400">WhatsApp Conectado com Sucesso!</p>
                     <button onClick={desconectarWhatsApp} className="text-xs text-rose-400 hover:underline">Desconectar Aparelho</button>
                   </div>
-                ) : whatsappQrCode ? (
+                ) : whatsappQrCode && !qrExpirado ? (
                   <div className="space-y-4">
                     <img src={whatsappQrCode} alt="QR Code WhatsApp" className="w-48 h-48 mx-auto bg-white p-2 rounded-xl" />
                     <p className="text-xs text-slate-400 animate-pulse">Abra o WhatsApp &gt; Aparelhos Conectados &gt; Conectar Aparelho</p>
+                    <p className="text-[11px] text-slate-500">O QR Code muda sozinho a cada ~20 segundos.</p>
+                    <button onClick={solicitarConexaoWhatsApp} disabled={carregandoQr} className="text-xs text-emerald-400 hover:underline disabled:opacity-60">
+                      {carregandoQr ? 'Gerando...' : 'Gerar novo QR Code'}
+                    </button>
                   </div>
                 ) : (
                   <div className="space-y-4 py-6">
                     {whatsappErro && (
                       <p className="text-xs text-rose-400 max-w-xs mx-auto">{whatsappErro}</p>
+                    )}
+                    {qrExpirado && !carregandoQr && (
+                      <p className="text-xs text-amber-400 max-w-xs mx-auto">O QR Code expirou (a conexão que o gerou caiu). Gere um novo para conectar.</p>
                     )}
                     <p className="text-xs text-slate-400">
                       {carregandoQr ? 'Gerando QR Code, aguarde alguns segundos...' : 'Nenhum QR Code ativo no momento.'}
