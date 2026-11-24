@@ -42,6 +42,20 @@ const ORIGENS_PERMITIDAS = (process.env.ALLOWED_ORIGINS || 'https://financeiro-s
   .map(o => o.trim())
   .filter(Boolean);
 
+// Identifica qual versão do servidor está no ar (aparece no log de inicialização e em GET /)
+const BUILD_ID = '2026-11-24-wpp-v2';
+
+// Registro de cada chamada (método, rota, status e origem): sem isso, uma chamada recusada
+// por CORS, login ou assinatura não deixava nenhum rastro nos logs do Railway
+app.use((req, res, next) => {
+  if (req.path === '/') return next(); // ping público, não polui o log
+  const inicio = Date.now();
+  res.on('finish', () => {
+    console.log(`🌐 ${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - inicio}ms) origem=${req.headers.origin || '-'}`);
+  });
+  next();
+});
+
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || ORIGENS_PERMITIDAS.includes(origin)) return callback(null, true);
@@ -72,6 +86,7 @@ const autenticarUsuario = async (req, res, next) => {
     req.userEmail = decodificado.email || null;
     next();
   } catch (e) {
+    console.warn('🔒 Token de login recusado:', e.code || e.message);
     return res.status(401).json({ error: 'Sessão inválida ou expirada.' });
   }
 };
@@ -206,7 +221,7 @@ app.get('/', (req, res) => {
     ultimaVerificacaoPorPing = agora;
     verificarAlertasVencimento(false).catch(() => {});
   }
-  res.status(200).send('API FinZap Online');
+  res.status(200).send(`API FinZap Online (build ${BUILD_ID})`);
 });
 
 const ASAAS_API_URL = process.env.ASAAS_API_URL || 'https://sandbox.asaas.com/api/v3';
@@ -1545,6 +1560,8 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT} | Auth Dir: ${AUTH_BASE_DIR}`);
+  console.log(`🚀 Servidor rodando na porta ${PORT} | Auth Dir: ${AUTH_BASE_DIR} | build ${BUILD_ID}`);
+  if (!process.env.ASAAS_WEBHOOK_TOKEN) console.warn('⚠️ ASAAS_WEBHOOK_TOKEN não definido: o webhook do Asaas será recusado.');
+  if (!process.env.ASAAS_API_KEY) console.warn('⚠️ ASAAS_API_KEY não definido: cobranças ficam indisponíveis.');
   restaurarSessoesAtivas();
 });
