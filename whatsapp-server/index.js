@@ -43,7 +43,7 @@ const ORIGENS_PERMITIDAS = (process.env.ALLOWED_ORIGINS || 'https://financeiro-s
   .filter(Boolean);
 
 // Identifica qual versão do servidor está no ar (aparece no log de inicialização e em GET /)
-const BUILD_ID = '2026-11-24-wpp-v5';
+const BUILD_ID = '2026-11-25-limites-v6';
 
 // Registro de cada chamada (método, rota, status e origem): sem isso, uma chamada recusada
 // por CORS, login ou assinatura não deixava nenhum rastro nos logs do Railway
@@ -65,6 +65,88 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '100kb' }));
 
+// ============================================================================
+// LIMITE DE REQUISIÇÕES
+// Em memória, porque o servidor roda em uma única instância no Railway.
+// (Se um dia houver mais de uma instância, trocar por um limitador compartilhado, como Redis.)
+// ============================================================================
+// O Railway fica na frente do servidor: sem isto, todo mundo pareceria ter o mesmo IP (o do proxy)
+app.set('trust proxy', 1);
+
+function criarLimitador({ janelaMs, max }) {
+  const contadores = new Map(); // chave -> { n, resetEm }
+
+  // Limpa o que já venceu para o mapa não crescer para sempre
+  setInterval(() => {
+    const agora = Date.now();
+    for (const [chave, c] of contadores) {
+      if (c.resetEm <= agora) contadores.delete(chave);
+    }
+  }, 60 * 1000).unref();
+
+  return {
+    // Conta mais uma tentativa e diz se ainda está dentro do limite
+    consumir(chave) {
+      const agora = Date.now();
+      let c = contadores.get(chave);
+      if (!c || c.resetEm <= agora) {
+        c = { n: 0, resetEm: agora + janelaMs };
+        contadores.set(chave, c);
+      }
+      c.n += 1;
+      return {
+        ok: c.n <= max,
+        n: c.n,
+        restante: Math.max(0, max - c.n),
+        esperarSeg: Math.max(1, Math.ceil((c.resetEm - agora) / 1000))
+      };
+    },
+    // Só consulta, sem contar
+    bloqueado(chave) {
+      const c = contadores.get(chave);
+      return !!c && c.resetEm > Date.now() && c.n > max;
+    },
+    esperarSeg(chave) {
+      const c = contadores.get(chave);
+      return c ? Math.max(1, Math.ceil((c.resetEm - Date.now()) / 1000)) : 1;
+    }
+  };
+}
+
+// Middleware: limita por IP (padrão) ou por usuário logado (porUsuario, depois do autenticarUsuario)
+const limitar = ({ janelaMs, max, porUsuario = false, mensagem }) => {
+  const limitador = criarLimitador({ janelaMs, max });
+  return (req, res, next) => {
+    const chave = porUsuario && req.uid ? `u:${req.uid}` : `ip:${req.ip}`;
+    const r = limitador.consumir(chave);
+    if (!r.ok) {
+      res.set('Retry-After', String(r.esperarSeg));
+      if (r.n === max + 1) console.warn(`⛔ Limite excedido em ${req.method} ${req.path} (${chave})`);
+      return res.status(429).json({ error: mensagem || `Muitas requisições. Tente de novo em ${r.esperarSeg}s.` });
+    }
+    next();
+  };
+};
+
+// Teto geral por IP. O webhook do Asaas tem limite próprio (mais folgado) para não perder aviso de pagamento.
+const limiteGeral = limitar({ janelaMs: 60 * 1000, max: 120, mensagem: 'Muitas requisições em pouco tempo. Aguarde um instante.' });
+app.use((req, res, next) => (req.path === '/webhook/asaas' ? next() : limiteGeral(req, res, next)));
+
+// Limites por ação (por usuário logado): ações caras ou que mexem no WhatsApp/Asaas
+const limiteConta = limitar({ janelaMs: 10 * 60 * 1000, max: 10, porUsuario: true, mensagem: 'Muitas tentativas. Aguarde alguns minutos.' });
+const limiteAdmin = limitar({ janelaMs: 60 * 1000, max: 30, porUsuario: true });
+const limiteCobranca = limitar({ janelaMs: 60 * 60 * 1000, max: 5, porUsuario: true, mensagem: 'Você já gerou várias cobranças. Aguarde um pouco antes de gerar outra.' });
+const limiteConexaoWpp = limitar({ janelaMs: 10 * 60 * 1000, max: 6, porUsuario: true, mensagem: 'Você pediu QR Code vezes demais. Aguarde alguns minutos e tente de novo.' });
+const limiteTesteAlerta = limitar({ janelaMs: 10 * 60 * 1000, max: 3, porUsuario: true, mensagem: 'Muitos testes de alerta seguidos. Aguarde alguns minutos.' });
+const limiteWebhook = limitar({ janelaMs: 60 * 1000, max: 600 });
+const limiteInterno = limitar({ janelaMs: 60 * 1000, max: 10 });
+
+// Tentativas de login inválidas repetidas do mesmo IP bloqueiam esse IP por um tempo
+const falhasLogin = criarLimitador({ janelaMs: 10 * 60 * 1000, max: 30 });
+
+// Excesso de mensagens do WhatsApp por usuário (evita laço ou abuso do robô)
+const limiteMensagensWpp = criarLimitador({ janelaMs: 60 * 1000, max: 30 });
+
 // Comparação de segredos em tempo constante
 const compararSegredo = (recebido, esperado) => {
   if (!recebido || !esperado) return false;
@@ -76,9 +158,18 @@ const compararSegredo = (recebido, esperado) => {
 // O site envia o token de login do Firebase; o servidor descobre QUEM é o usuário por ele
 // (nunca confia em userId vindo do corpo da requisição).
 const autenticarUsuario = async (req, res, next) => {
+  const chaveIp = `ip:${req.ip}`;
+  if (falhasLogin.bloqueado(chaveIp)) {
+    res.set('Retry-After', String(falhasLogin.esperarSeg(chaveIp)));
+    return res.status(429).json({ error: 'Muitas tentativas inválidas. Aguarde alguns minutos.' });
+  }
+
   const cabecalho = req.headers.authorization || '';
   const token = cabecalho.startsWith('Bearer ') ? cabecalho.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Login necessário.' });
+  if (!token) {
+    falhasLogin.consumir(chaveIp);
+    return res.status(401).json({ error: 'Login necessário.' });
+  }
 
   try {
     const decodificado = await admin.auth().verifyIdToken(token);
@@ -86,6 +177,7 @@ const autenticarUsuario = async (req, res, next) => {
     req.userEmail = decodificado.email || null;
     next();
   } catch (e) {
+    falhasLogin.consumir(chaveIp);
     console.warn('🔒 Token de login recusado:', e.code || e.message);
     return res.status(401).json({ error: 'Sessão inválida ou expirada.' });
   }
@@ -282,7 +374,7 @@ const verificarAcessoAtivo = async (userId) => {
 
 // Chamada pelo site no primeiro login (e em contas antigas sem período definido):
 // cria a conta com o teste grátis. O navegador não consegue gravar esses campos (regras do Firestore).
-app.post('/conta/iniciar', autenticarUsuario, async (req, res) => {
+app.post('/conta/iniciar', autenticarUsuario, limiteConta, async (req, res) => {
   try {
     const userRef = db.collection('users').doc(req.uid);
     const snap = await userRef.get();
@@ -322,7 +414,7 @@ app.post('/conta/iniciar', autenticarUsuario, async (req, res) => {
 });
 
 // Lista de clientes para o painel master: só o servidor lê todos os usuários e só devolve dados de conta
-app.post('/admin/clientes', autenticarUsuario, async (req, res) => {
+app.post('/admin/clientes', autenticarUsuario, limiteAdmin, async (req, res) => {
   if (!req.userEmail || req.userEmail.toLowerCase() !== MASTER_EMAIL) {
     return res.status(403).json({ error: 'Acesso negado.' });
   }
@@ -350,7 +442,7 @@ app.post('/admin/clientes', autenticarUsuario, async (req, res) => {
 const VALOR_PLANO = Number(process.env.PLANO_VALOR || 49.9);
 const STATUS_PAGAMENTO_OK = ['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'];
 
-app.post('/asaas/gerar-cobranca', autenticarUsuario, async (req, res) => {
+app.post('/asaas/gerar-cobranca', autenticarUsuario, limiteCobranca, async (req, res) => {
   const userId = req.uid;
   const email = req.userEmail;
   const nome = typeof req.body?.nome === 'string' ? req.body.nome.slice(0, 100) : '';
@@ -396,7 +488,7 @@ app.post('/asaas/gerar-cobranca', autenticarUsuario, async (req, res) => {
   }
 });
 
-app.post('/webhook/asaas', async (req, res) => {
+app.post('/webhook/asaas', limiteWebhook, async (req, res) => {
   // 1) Só o Asaas conhece este token (configure o mesmo valor no painel do Asaas, em Webhooks)
   if (!process.env.ASAAS_WEBHOOK_TOKEN) {
     console.error('❌ ASAAS_WEBHOOK_TOKEN não configurado: webhook recusado.');
@@ -459,18 +551,18 @@ app.post('/webhook/asaas', async (req, res) => {
 });
 
 // Dispara para TODOS os usuários: só para uso interno (cron), nunca pelo navegador
-app.get('/verificar-alertas', validarChaveInterna, async (req, res) => {
+app.get('/verificar-alertas', limiteInterno, validarChaveInterna, async (req, res) => {
   await verificarAlertasVencimento(true);
   res.status(200).send('OK - Alertas verificados');
 });
 
 // Teste de alerta: só para o próprio usuário logado
-app.post('/whatsapp/testar-alerta', autenticarUsuario, async (req, res) => {
+app.post('/whatsapp/testar-alerta', autenticarUsuario, limiteTesteAlerta, async (req, res) => {
   await verificarAlertasVencimento(true, req.uid);
   res.json({ ok: true });
 });
 
-app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, async (req, res) => {
+app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, limiteConexaoWpp, async (req, res) => {
   const userId = req.uid;
   if (!(await verificarAcessoAtivo(userId))) {
     return res.status(402).json({ error: 'Assinatura necessária para conectar o WhatsApp.' });
@@ -497,7 +589,7 @@ app.post(['/conectar', '/whatsapp/iniciar'], autenticarUsuario, async (req, res)
   }
 });
 
-app.post(['/desconectar', '/whatsapp/desconectar'], autenticarUsuario, async (req, res) => {
+app.post(['/desconectar', '/whatsapp/desconectar'], autenticarUsuario, limiteConexaoWpp, async (req, res) => {
   const userId = req.uid;
 
   const sock = sessions.get(userId);
@@ -709,6 +801,18 @@ async function startWhatsAppForUser(userId, forcarVersaoNova = false) {
       if (isChatComOutraPessoa || isOutroLid) return;
 
       userJids.set(userId, remoteJid);
+
+      // Muitas mensagens em um minuto: ignora o excesso e avisa uma única vez
+      const limiteMsg = limiteMensagensWpp.consumir(`u:${userId}`);
+      if (!limiteMsg.ok) {
+        if (limiteMsg.n === 31) {
+          console.warn(`⛔ Excesso de mensagens do WhatsApp de ${userId}`);
+          await sock.sendMessage(remoteJid, {
+            text: '⏳ Você enviou muitas mensagens em pouco tempo. Aguarde um minuto e tente de novo.'
+          });
+        }
+        return;
+      }
 
       if (!(await verificarAcessoAtivo(userId))) {
         await sock.sendMessage(remoteJid, {
