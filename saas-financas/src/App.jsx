@@ -21,7 +21,7 @@ import {
 import {
   collection, doc, setDoc, addDoc, updateDoc,
   deleteDoc, onSnapshot, query, where, orderBy, getDocs,
-  writeBatch, serverTimestamp
+  writeBatch, serverTimestamp, runTransaction
 } from 'firebase/firestore';
 import { db, auth } from './firebaseConfig';
 
@@ -64,6 +64,29 @@ const comId = (lista) =>
     ...item,
     id: item.id || item.nome || `item_${i}`
   }));
+
+// Altera uma lista do documento do usuário (bancos, cartoes, contas_fixas) de forma ATÔMICA:
+// lê a versão mais recente no servidor e aplica a mudança em cima dela. Assim, duas abas ou dois aparelhos
+// mexendo ao mesmo tempo (ou um duplo clique) não apagam a alteração um do outro.
+const atualizarListaDoUsuario = (uid, campo, alterar) =>
+  runTransaction(db, async (t) => {
+    const ref = doc(db, 'users', uid);
+    const snap = await t.get(ref);
+    const atual = comId(snap.exists() ? snap.data()[campo] : []);
+    t.set(ref, { [campo]: alterar(atual) }, { merge: true });
+  });
+
+// Executa um salvamento e avisa a pessoa se falhar (sem internet, sem permissão...)
+const tentarSalvar = async (acao) => {
+  try {
+    await acao();
+    return true;
+  } catch (e) {
+    console.error('Erro ao salvar:', e);
+    alert('Não foi possível salvar agora. Verifique a conexão e tente de novo.');
+    return false;
+  }
+};
 
 // O servidor grava status_assinatura e acesso_ate; o site só interpreta
 const calcularStatusAssinatura = (data) => {
@@ -456,17 +479,23 @@ export default function App() {
       diaVencimento: Number(cartaoForm.diaVencimento || 12),
       banco: (cartaoForm.banco || '').trim()
     };
-    const lista = cartaoForm.id
-      ? cartoes.map(c => (c.id === cartaoForm.id ? { ...c, ...dados, id: c.id } : c))
-      : [...cartoes, { ...dados, id: String(Date.now()) }];
-    await setDoc(doc(db, 'users', user.uid), { cartoes: lista }, { merge: true });
+    const idEdicao = cartaoForm.id;
+    const novoId = String(Date.now());
+    const salvou = await tentarSalvar(() =>
+      atualizarListaDoUsuario(user.uid, 'cartoes', (lista) =>
+        idEdicao
+          ? lista.map(c => (c.id === idEdicao ? { ...c, ...dados, id: c.id } : c))
+          : [...lista, { ...dados, id: novoId }]
+      )
+    );
+    if (!salvou) return;
     setCartaoForm({ id: null, nome: '', limite: '', diaFechamento: '5', diaVencimento: '12', banco: '' });
   };
 
   const editarCartao = (c) => setCartaoForm({ ...c });
   const excluirCartao = async (id) => {
     if (window.confirm('Deseja remover este cartão?')) {
-      await setDoc(doc(db, 'users', user.uid), { cartoes: cartoes.filter(c => c.id !== id) }, { merge: true });
+      await tentarSalvar(() => atualizarListaDoUsuario(user.uid, 'cartoes', (lista) => lista.filter(c => c.id !== id)));
     }
   };
 
@@ -478,17 +507,23 @@ export default function App() {
       tipo: bancoForm.tipo,
       saldoInicial: Number(bancoForm.saldoInicial || 0)
     };
-    const lista = bancoForm.id
-      ? bancos.map(b => (b.id === bancoForm.id ? { ...b, ...dados, id: b.id } : b))
-      : [...bancos, { ...dados, id: String(Date.now()) }];
-    await setDoc(doc(db, 'users', user.uid), { bancos: lista }, { merge: true });
+    const idEdicao = bancoForm.id;
+    const novoId = String(Date.now());
+    const salvou = await tentarSalvar(() =>
+      atualizarListaDoUsuario(user.uid, 'bancos', (lista) =>
+        idEdicao
+          ? lista.map(b => (b.id === idEdicao ? { ...b, ...dados, id: b.id } : b))
+          : [...lista, { ...dados, id: novoId }]
+      )
+    );
+    if (!salvou) return;
     setBancoForm({ id: null, nome: '', tipo: 'Conta Corrente / Débito', saldoInicial: '' });
   };
 
   const editarBanco = (b) => setBancoForm({ ...b });
   const excluirBanco = async (id) => {
     if (window.confirm('Deseja remover esta conta bancária?')) {
-      await setDoc(doc(db, 'users', user.uid), { bancos: bancos.filter(b => b.id !== id) }, { merge: true });
+      await tentarSalvar(() => atualizarListaDoUsuario(user.uid, 'bancos', (lista) => lista.filter(b => b.id !== id)));
     }
   };
 
@@ -496,13 +531,13 @@ export default function App() {
   const criarBancoRapido = async ({ nome, tipo, saldoInicial }) => {
     if (!user) return;
     const novo = { id: String(Date.now()), nome, tipo, saldoInicial };
-    await setDoc(doc(db, 'users', user.uid), { bancos: [...bancos, novo] }, { merge: true });
+    await atualizarListaDoUsuario(user.uid, 'bancos', (lista) => [...lista, novo]);
   };
 
   const criarCartaoRapido = async ({ nome, banco, limite, diaFechamento, diaVencimento }) => {
     if (!user) return;
     const novo = { id: String(Date.now()), nome, banco, limite, diaFechamento, diaVencimento };
-    await setDoc(doc(db, 'users', user.uid), { cartoes: [...cartoes, novo] }, { merge: true });
+    await atualizarListaDoUsuario(user.uid, 'cartoes', (lista) => [...lista, novo]);
   };
 
   const concluirOnboarding = async (irParaWhatsapp = false) => {
@@ -676,14 +711,17 @@ export default function App() {
       valorPadrao: parseFloat(fixaValor),
       diaVencimento: Number(fixaDia)
     };
-    await setDoc(doc(db, 'users', user.uid), { contas_fixas: [...contasFixas, nova] }, { merge: true });
+    const salvouFixa = await tentarSalvar(() =>
+      atualizarListaDoUsuario(user.uid, 'contas_fixas', (lista) => [...lista, nova])
+    );
+    if (!salvouFixa) return;
     setFixaNome('');
     setFixaValor('');
     setFixaDia('');
   };
 
   const excluirContaFixa = (id) =>
-    setDoc(doc(db, 'users', user.uid), { contas_fixas: contasFixas.filter(cf => cf.id !== id) }, { merge: true });
+    tentarSalvar(() => atualizarListaDoUsuario(user.uid, 'contas_fixas', (lista) => lista.filter(cf => cf.id !== id)));
 
 // ============================================================================
 // ==================== FIM PARTE 2 DE 4 ======================================
